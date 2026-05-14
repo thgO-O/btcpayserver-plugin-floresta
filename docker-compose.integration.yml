@@ -112,7 +112,7 @@ services:
       dockerfile: docker/utreexod/Dockerfile
       args:
         UTREEXOD_REPO: ${UTREEXOD_REPO:-https://github.com/utreexo/utreexod.git}
-        UTREEXOD_REF: ${UTREEXOD_REF:-main}
+        UTREEXOD_REF: ${UTREEXOD_REF:-master}
     profiles: ["e2e"]
     command:
       - utreexod

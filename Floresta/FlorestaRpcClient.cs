@@ -16,6 +16,7 @@ public class FlorestaRpcClient
     private readonly SettingsRepository _settingsRepository;
     private readonly ILogger<FlorestaRpcClient> _logger;
     private readonly HttpClient _httpClient;
+    private readonly bool _explicitSettings;
     private FlorestaSettings _settings;
     private int _nextId;
 
@@ -38,6 +39,7 @@ public class FlorestaRpcClient
         : this(null, logger, new HttpClient { Timeout = TimeSpan.FromSeconds(30) })
     {
         _settings = settings;
+        _explicitSettings = true;
     }
 
     public async Task PingAsync(CancellationToken ct)
@@ -145,10 +147,10 @@ public class FlorestaRpcClient
 
     private async Task<FlorestaSettings> GetSettingsAsync()
     {
-        if (_settings is not null)
+        if (_explicitSettings)
             return _settings;
-        _settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
-        return _settings;
+
+        return await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
     }
 }
 

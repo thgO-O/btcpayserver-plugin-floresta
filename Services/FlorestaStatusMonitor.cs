@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Events;
@@ -28,6 +29,10 @@ public class FlorestaStatusMonitor : IHostedService
     public NBXplorerState State { get; private set; } = NBXplorerState.NotConnected;
     public int TipHeight { get; private set; }
     public string ServerVersion { get; private set; }
+    public string BestBlockHash { get; private set; }
+    public bool? IsInitialBlockDownload { get; private set; }
+    public int? ValidatedHeight { get; private set; }
+    public int? UtreexoRootCount { get; private set; }
 
     public FlorestaStatusMonitor(
         FlorestaElectrumClient client,
@@ -106,14 +111,18 @@ public class FlorestaStatusMonitor : IHostedService
         try
         {
             await _client.PingAsync(ct);
+            if (string.IsNullOrEmpty(ServerVersion))
+            {
+                var (sw, _) = await _client.ServerVersionAsync("BTCPayServer-Floresta", "1.4", ct);
+                ServerVersion = sw;
+            }
+
             var blockchainInfo = await _rpcClient.GetBlockchainInfoAsync(ct);
-            if (blockchainInfo.TryGetProperty("height", out var height))
-                TipHeight = height.GetInt32();
+            UpdateChainInfo(blockchainInfo);
 
             _ = await _client.ServerFeaturesAsync(ct);
 
-            // We consider ourselves synced if connected and responding
-            State = NBXplorerState.Ready;
+            State = IsInitialBlockDownload == true ? NBXplorerState.Synching : NBXplorerState.Ready;
 
             var status = BuildStatusResult();
             PublishDashboard(status, oldState);
@@ -128,17 +137,18 @@ public class FlorestaStatusMonitor : IHostedService
 
     private StatusResult BuildStatusResult()
     {
+        var syncHeight = ValidatedHeight ?? TipHeight;
         return new StatusResult
         {
             IsFullySynched = State == NBXplorerState.Ready,
             ChainHeight = TipHeight,
-            SyncHeight = TipHeight,
+            SyncHeight = syncHeight,
             Version = ServerVersion ?? "floresta-plugin",
             SupportedCryptoCodes = new[] { "BTC" },
             NetworkType = GetChainName(),
             BitcoinStatus = new BitcoinStatus
             {
-                Blocks = TipHeight,
+                Blocks = syncHeight,
                 Headers = TipHeight,
                 VerificationProgress = 1.0,
                 IsSynched = State == NBXplorerState.Ready,
@@ -150,6 +160,50 @@ public class FlorestaStatusMonitor : IHostedService
                 }
             }
         };
+    }
+
+    private void UpdateChainInfo(JsonElement blockchainInfo)
+    {
+        TipHeight = GetInt32(blockchainInfo, "blocks") ?? GetInt32(blockchainInfo, "height") ?? TipHeight;
+        BestBlockHash = GetString(blockchainInfo, "bestblockhash") ?? GetString(blockchainInfo, "best_block") ?? BestBlockHash;
+        IsInitialBlockDownload = GetBool(blockchainInfo, "initialblockdownload") ?? GetBool(blockchainInfo, "ibd") ?? IsInitialBlockDownload;
+        ValidatedHeight = GetInt32(blockchainInfo, "validated") ?? ValidatedHeight;
+        UtreexoRootCount = GetInt32(blockchainInfo, "root_count") ?? UtreexoRootCount;
+    }
+
+    private static int? GetInt32(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
+            return null;
+
+        if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var value))
+            return value;
+
+        if (property.ValueKind == JsonValueKind.String && int.TryParse(property.GetString(), out value))
+            return value;
+
+        return null;
+    }
+
+    private static bool? GetBool(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
+            return null;
+
+        if (property.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            return property.GetBoolean();
+
+        if (property.ValueKind == JsonValueKind.String && bool.TryParse(property.GetString(), out var value))
+            return value;
+
+        return null;
+    }
+
+    private static string GetString(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
     }
 
     private NBitcoin.ChainName GetChainName()

@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
@@ -62,8 +64,8 @@ public class UIFlorestaController : Controller
 
                 var rpcClient = new FlorestaRpcClient(settings, NullLogger<FlorestaRpcClient>.Instance);
                 var blockchainInfo = await rpcClient.GetBlockchainInfoAsync(cts.Token);
-                var blocks = blockchainInfo.TryGetProperty("blocks", out var b) ? b.GetInt32().ToString() : "unknown";
-                ViewBag.StatusMessage = $"Connection successful. Electrum: {sw} protocol {pv}. RPC blocks: {blocks}.";
+                ViewBag.StatusMessage =
+                    $"Connection successful. Electrum: {sw} protocol {pv}. RPC {FormatBlockchainInfo(blockchainInfo)}.";
             }
             catch (Exception ex)
             {
@@ -79,8 +81,12 @@ public class UIFlorestaController : Controller
             try
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-                var count = await RegisterDescriptorsForStores(settings, cts.Token);
-                ViewBag.StatusMessage = $"Descriptor registration completed. New descriptors registered: {count}.";
+                var result = await RegisterDescriptorsForStores(settings, cts.Token);
+                ViewBag.StatusMessage =
+                    $"Descriptor registration completed. Stores scanned: {result.StoresScanned}. " +
+                    $"BTC wallets found: {result.StoresWithWallet}. " +
+                    $"Already registered: {result.AlreadyRegistered}. " +
+                    $"New descriptors registered: {result.Registered}.";
                 return View(settings);
             }
             catch (Exception ex)
@@ -97,7 +103,9 @@ public class UIFlorestaController : Controller
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                 var rpcClient = new FlorestaRpcClient(settings, NullLogger<FlorestaRpcClient>.Instance);
                 await rpcClient.RescanBlockchainAsync(settings.DefaultRescanStartHeight, null, false, "medium", cts.Token);
-                ViewBag.StatusMessage = $"Rescan requested from height {settings.DefaultRescanStartHeight?.ToString() ?? "default"}.";
+                ViewBag.StatusMessage =
+                    $"Rescan requested from height {settings.DefaultRescanStartHeight?.ToString() ?? "default"}. " +
+                    "Floresta runs the rescan asynchronously; use Test Connection to follow RPC sync status.";
                 return View(settings);
             }
             catch (Exception ex)
@@ -111,29 +119,108 @@ public class UIFlorestaController : Controller
         return RedirectToAction(nameof(Settings));
     }
 
-    private async Task<int> RegisterDescriptorsForStores(FlorestaSettings settings, CancellationToken ct)
+    private async Task<DescriptorRegistrationResult> RegisterDescriptorsForStores(FlorestaSettings settings, CancellationToken ct)
     {
         var rpcClient = new FlorestaRpcClient(settings, NullLogger<FlorestaRpcClient>.Instance);
         var loaded = (await rpcClient.ListDescriptorsAsync(ct) ?? Array.Empty<string>()).ToHashSet(StringComparer.Ordinal);
+        var storesScanned = 0;
+        var storesWithWallet = 0;
+        var alreadyRegistered = 0;
         var registered = 0;
 
         foreach (var store in await _storeRepository.GetStores())
         {
+            storesScanned++;
             var scheme = store.GetDerivationSchemeSettings(_handlers, settings.CryptoCode, true)?.AccountDerivation;
             if (scheme is null)
                 continue;
 
+            storesWithWallet++;
             var descriptors = _descriptorService.CreateDescriptors(settings.CryptoCode, scheme.ToString());
             foreach (var descriptor in new[] { descriptors.ReceiveDescriptor, descriptors.ChangeDescriptor })
             {
                 if (loaded.Contains(descriptor))
+                {
+                    alreadyRegistered++;
                     continue;
+                }
                 await rpcClient.LoadDescriptorAsync(descriptor, ct);
                 loaded.Add(descriptor);
                 registered++;
             }
         }
 
-        return registered;
+        return new DescriptorRegistrationResult(storesScanned, storesWithWallet, alreadyRegistered, registered);
     }
+
+    private static string FormatBlockchainInfo(JsonElement blockchainInfo)
+    {
+        var height = GetInt32(blockchainInfo, "blocks") ?? GetInt32(blockchainInfo, "height");
+        var bestBlock = GetString(blockchainInfo, "bestblockhash") ?? GetString(blockchainInfo, "best_block");
+        var ibd = GetBool(blockchainInfo, "initialblockdownload") ?? GetBool(blockchainInfo, "ibd");
+        var validated = GetInt32(blockchainInfo, "validated");
+        var rootCount = GetInt32(blockchainInfo, "root_count");
+
+        var parts = new List<string>
+        {
+            $"height: {height?.ToString() ?? "unknown"}"
+        };
+
+        if (!string.IsNullOrEmpty(bestBlock))
+            parts.Add($"best: {ShortHash(bestBlock)}");
+        if (ibd is not null)
+            parts.Add($"ibd: {ibd.Value.ToString().ToLowerInvariant()}");
+        if (validated is not null)
+            parts.Add($"validated: {validated.Value}");
+        if (rootCount is not null)
+            parts.Add($"roots: {rootCount.Value}");
+
+        return string.Join(", ", parts);
+    }
+
+    private static int? GetInt32(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
+            return null;
+
+        if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var value))
+            return value;
+
+        if (property.ValueKind == JsonValueKind.String && int.TryParse(property.GetString(), out value))
+            return value;
+
+        return null;
+    }
+
+    private static bool? GetBool(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
+            return null;
+
+        if (property.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            return property.GetBoolean();
+
+        if (property.ValueKind == JsonValueKind.String && bool.TryParse(property.GetString(), out var value))
+            return value;
+
+        return null;
+    }
+
+    private static string GetString(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
+    }
+
+    private static string ShortHash(string hash)
+    {
+        return hash.Length <= 16 ? hash : $"{hash[..8]}...{hash[^8..]}";
+    }
+
+    private sealed record DescriptorRegistrationResult(
+        int StoresScanned,
+        int StoresWithWallet,
+        int AlreadyRegistered,
+        int Registered);
 }

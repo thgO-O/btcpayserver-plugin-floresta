@@ -128,20 +128,7 @@ public class FlorestaListener : IHostedService
                 var ct = _cts?.Token ?? CancellationToken.None;
                 var newTxs = await _tracker.HandleScripthashNotificationAsync(scripthash, status, ct);
 
-                if (newTxs == null || newTxs.Count == 0) return;
-
-                var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
-                if (network == null) return;
-
-                var wallet = _walletProvider.GetWallet(network);
-                if (wallet == null) return;
-
-                var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
-
-                foreach (var newTx in newTxs)
-                {
-                    await ProcessNewTransaction(newTx, network, wallet, pmi);
-                }
+                await ProcessNewTransactions(newTxs, ct);
             }
             catch (Exception ex)
             {
@@ -161,24 +148,8 @@ public class FlorestaListener : IHostedService
 
                 var newTxs = await _tracker.HandleNewBlockAsync(header.Height, ct);
 
-                var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
-                if (network != null)
-                {
-                    var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
-                    var wallet = _walletProvider.GetWallet(network);
-
-                    if (wallet != null)
-                    {
-                        foreach (var newTx in newTxs)
-                        {
-                            await ProcessNewTransaction(newTx, network, wallet, pmi);
-                        }
-                    }
-
-                    _eventAggregator.Publish(new BTCPayServer.Events.NewBlockEvent { PaymentMethodId = pmi });
-
-                    await UpdatePaymentStates(network, pmi, ct);
-                }
+                await ProcessNewTransactions(newTxs, ct);
+                await PublishChainUpdate(ct);
             }
             catch (Exception ex)
             {
@@ -197,11 +168,47 @@ public class FlorestaListener : IHostedService
             var header = await _electrumClient.HeadersSubscribeAsync(ct);
             _statusMonitor.UpdateTipHeight(header.Height);
             _tracker.SetTipHeight(header.Height);
+            var newTxs = await _tracker.HandleNewBlockAsync(header.Height, ct);
+            await ProcessNewTransactions(newTxs, ct);
+            await FindPaymentsViaPolling(ct);
+            await PublishChainUpdate(ct);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error during reconnection re-initialization");
         }
+    }
+
+    private async Task ProcessNewTransactions(
+        IReadOnlyCollection<FlorestaWalletTracker.NewTransactionInfo> newTxs,
+        CancellationToken ct)
+    {
+        if (newTxs == null || newTxs.Count == 0 || ct.IsCancellationRequested)
+            return;
+
+        var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
+        if (network == null) return;
+
+        var wallet = _walletProvider.GetWallet(network);
+        if (wallet == null) return;
+
+        var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
+
+        foreach (var newTx in newTxs)
+        {
+            ct.ThrowIfCancellationRequested();
+            await ProcessNewTransaction(newTx, network, wallet, pmi);
+        }
+    }
+
+    private async Task PublishChainUpdate(CancellationToken ct)
+    {
+        var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
+        if (network == null) return;
+
+        var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
+        _eventAggregator.Publish(new BTCPayServer.Events.NewBlockEvent { PaymentMethodId = pmi });
+        await UpdatePaymentStates(network, pmi, ct);
     }
 
     private async Task ProcessNewTransaction(

@@ -81,6 +81,25 @@ Do not publish RPC to the public internet. The Electrum endpoint is also expecte
 
 ## Plugin Settings
 
+The plugin can be bootstrapped with `FLORESTA_*` environment variables. These values act as defaults before settings are saved in BTCPay:
+
+```text
+FLORESTA_ENABLED=true
+FLORESTA_CRYPTO_CODE=BTC
+FLORESTA_NETWORK=mainnet
+FLORESTA_ELECTRUM_HOST=floresta
+FLORESTA_ELECTRUM_PORT=50001
+FLORESTA_ELECTRUM_TLS=false
+FLORESTA_RPC_URL=http://floresta:8332
+FLORESTA_RPC_USER=
+FLORESTA_RPC_PASSWORD=
+FLORESTA_GAP_LIMIT=100
+FLORESTA_FILTERS_START_HEIGHT=0
+FLORESTA_AUTO_REGISTER_DESCRIPTORS=true
+FLORESTA_AUTO_RESCAN_ON_NEW_DESCRIPTOR=false
+FLORESTA_USE_AS_BITCOIN_BACKEND=true
+```
+
 For mainnet:
 
 ```text
@@ -96,6 +115,8 @@ AutoRegisterDescriptors=true
 AutoRescanOnNewDescriptor=false
 UseFlorestaAsBitcoinBackend=true
 ```
+
+The plugin is watch-only. Do not use BTCPay hot wallet creation with this backend; configure an xpub or descriptor and spend from an external wallet or PSBT workflow.
 
 For signet, adjust:
 

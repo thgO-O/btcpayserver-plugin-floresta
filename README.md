@@ -21,6 +21,8 @@ Implemented:
 
 - standalone plugin project outside the BTCPay Server repository;
 - Floresta server settings page;
+- settings defaults from `FLORESTA_*` environment variables;
+- connection test output for Electrum version plus Floresta RPC height, best block, IBD, validation, and Utreexo root state when available;
 - local Floresta Electrum client with JSON-RPC line protocol, subscriptions, reconnect, and resubscribe;
 - local Floresta HTTP JSON-RPC client;
 - descriptor conversion for single-sig `wpkh`, `sh(wpkh)`, and `pkh`;
@@ -39,6 +41,7 @@ MVP limits:
 - single-sig only;
 - native SegWit/P2WPKH is the priority path;
 - multisig/miniscript/private key import are explicit non-goals for the MVP;
+- BTCPay hot wallet creation is not supported by this plugin; configure an xpub or descriptor and use an external wallet or PSBT workflow for spending;
 - no public Electrum fallback;
 - disabling the plugin at runtime is still coarse-grained: do not load the plugin package when you want normal NBXplorer behavior.
 
@@ -79,7 +82,7 @@ docker compose -f docker-compose.integration.yml --profile e2e down -v
 
 The E2E profile adds temporary Postgres, starts a real BTCPay Server process with `BTCPAY_DEBUG_PLUGINS` pointing to this plugin, opens Chromium via Playwright, registers admin users, saves Floresta settings, imports a BTC native SegWit xpub, creates an invoice, pays it, mines one regtest block, and checks that the invoice settles and the wallet transaction appears.
 
-The browser E2E topology is `florestad + bitcoind + utreexod`, matching Floresta's own confirmed-wallet regtest fixtures. The `utreexod` image is test-only and is built from `https://github.com/utreexo/utreexod.git` at `UTREEXOD_REF`, defaulting to `main`; override `UTREEXOD_REPO` or `UTREEXOD_REF` if a pinned fork or commit is needed. `bitcoind` remains only a transient regtest miner/payer for this browser test. Neither `bitcoind` nor `utreexod` is part of the runtime deployment, and NBXplorer is still not started.
+The browser E2E topology is `florestad + bitcoind + utreexod`, matching Floresta's own confirmed-wallet regtest fixtures. The `utreexod` image is test-only and is built from `https://github.com/utreexo/utreexod.git` at `UTREEXOD_REF`, defaulting to `master`; override `UTREEXOD_REPO` or `UTREEXOD_REF` if a pinned fork or commit is needed. `bitcoind` remains only a transient regtest miner/payer for this browser test. Neither `bitcoind` nor `utreexod` is part of the runtime deployment, and NBXplorer is still not started.
 
 The integration compose expects:
 
@@ -98,6 +101,27 @@ docker compose -f docker-compose.integration.yml up --build --abort-on-container
 ```
 
 Razor views compile on build so external plugin loading and Playwright E2E can exercise the actual BTCPay UI.
+
+## Environment Defaults
+
+The settings page can be prefilled from environment variables. Values stored in the BTCPay database still take precedence after settings are saved.
+
+```text
+FLORESTA_ENABLED=true
+FLORESTA_CRYPTO_CODE=BTC
+FLORESTA_NETWORK=mainnet
+FLORESTA_ELECTRUM_HOST=floresta
+FLORESTA_ELECTRUM_PORT=50001
+FLORESTA_ELECTRUM_TLS=false
+FLORESTA_RPC_URL=http://floresta:8332
+FLORESTA_RPC_USER=
+FLORESTA_RPC_PASSWORD=
+FLORESTA_GAP_LIMIT=100
+FLORESTA_FILTERS_START_HEIGHT=0
+FLORESTA_AUTO_REGISTER_DESCRIPTORS=true
+FLORESTA_AUTO_RESCAN_ON_NEW_DESCRIPTOR=false
+FLORESTA_USE_AS_BITCOIN_BACKEND=true
+```
 
 ## Floresta Methods Used
 

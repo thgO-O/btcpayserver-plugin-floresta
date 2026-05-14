@@ -6,6 +6,7 @@ public class FlorestaSettings
 {
     public FlorestaSettings()
     {
+        Enabled = GetBool("FLORESTA_ENABLED", Enabled);
         CryptoCode = GetString("FLORESTA_CRYPTO_CODE", CryptoCode);
         Network = GetString("FLORESTA_NETWORK", Network);
         ElectrumHost = GetString("FLORESTA_ELECTRUM_HOST", ElectrumHost);
@@ -16,6 +17,9 @@ public class FlorestaSettings
         RpcPassword = GetString("FLORESTA_RPC_PASSWORD", RpcPassword);
         GapLimit = GetInt("FLORESTA_GAP_LIMIT", GapLimit);
         DefaultRescanStartHeight = GetNullableInt("FLORESTA_FILTERS_START_HEIGHT", DefaultRescanStartHeight);
+        AutoRegisterDescriptors = GetBool("FLORESTA_AUTO_REGISTER_DESCRIPTORS", AutoRegisterDescriptors);
+        AutoRescanOnNewDescriptor = GetBool("FLORESTA_AUTO_RESCAN_ON_NEW_DESCRIPTOR", AutoRescanOnNewDescriptor);
+        UseFlorestaAsBitcoinBackend = GetBool("FLORESTA_USE_AS_BITCOIN_BACKEND", UseFlorestaAsBitcoinBackend);
     }
 
     public bool Enabled { get; set; } = true;

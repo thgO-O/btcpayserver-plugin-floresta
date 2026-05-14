@@ -11,8 +11,12 @@
     <div class="col-xxl-constrain col-xl-8">
         <form method="post">
             <div class="alert alert-info">
-                Este modo usa Floresta como backend Bitcoin leve. Ele não instala nem usa Bitcoin Core e não baixa a blockchain inteira.
-                O Floresta ainda precisa armazenar headers, compact filters, estado Utreexo e cache da wallet.
+                This mode uses Floresta as a lightweight Bitcoin backend. It does not install or use Bitcoin Core, and it does not download the full blockchain.
+                Floresta still needs to store headers, compact filters, Utreexo state, and wallet cache data.
+            </div>
+            <div class="alert alert-warning">
+                The Floresta plugin is watch-only. It registers xpubs/descriptors and tracks payments, but it does not create seeds, store private keys, or sign transactions.
+                Use an external wallet or PSBT workflow for spending.
             </div>
 
             <div class="form-group">
@@ -114,7 +118,7 @@
 
         @if (ViewBag.StatusMessage != null)
         {
-            <div class="alert alert-info mt-3">@ViewBag.StatusMessage</div>
+            <div class="alert alert-info mt-3 text-pre-wrap">@ViewBag.StatusMessage</div>
         }
     </div>
 </div>

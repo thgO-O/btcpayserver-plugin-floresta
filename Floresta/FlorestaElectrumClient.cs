@@ -44,6 +44,7 @@ public class FlorestaElectrumClient : IAsyncDisposable
 {
     private readonly SettingsRepository _settingsRepository;
     private readonly ILogger<FlorestaElectrumClient> _logger;
+    private readonly bool _explicitSettings;
 
     private FlorestaSettings _settings;
     private TcpClient _tcpClient;
@@ -78,6 +79,7 @@ public class FlorestaElectrumClient : IAsyncDisposable
     {
         _settings = settings;
         _logger = logger;
+        _explicitSettings = true;
     }
 
     public async Task ConnectAsync(CancellationToken ct)
@@ -85,8 +87,8 @@ public class FlorestaElectrumClient : IAsyncDisposable
         if (IsConnected) return;
         _intentionalDisconnect = false;
 
-        // Load settings from DB if not provided via constructor
-        _settings ??= await _settingsRepository.GetSettingAsync<FlorestaSettings>();
+        if (!_explicitSettings)
+            _settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
 
         if (string.IsNullOrEmpty(_settings?.Server))
             throw new InvalidOperationException("Floresta Electrum endpoint not configured. Go to Server Settings > Floresta.");
@@ -240,6 +242,9 @@ public class FlorestaElectrumClient : IAsyncDisposable
 
     private async Task<JsonElement> SendAsync(string method, object[] parameters, CancellationToken ct)
     {
+        if (!IsConnected || _writer is null)
+            throw new FlorestaElectrumException("Floresta Electrum client is not connected.");
+
         var id = Interlocked.Increment(ref _nextId);
         var request = new
         {
@@ -252,7 +257,11 @@ public class FlorestaElectrumClient : IAsyncDisposable
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
 
-        using var reg = ct.Register(() => tcs.TrySetCanceled(ct));
+        using var reg = ct.Register(() =>
+        {
+            if (_pending.TryRemove(id, out var pending))
+                pending.TrySetCanceled(ct);
+        });
 
         var json = JsonSerializer.Serialize(request);
 
@@ -260,6 +269,13 @@ public class FlorestaElectrumClient : IAsyncDisposable
         try
         {
             await _writer.WriteLineAsync(json);
+        }
+        catch
+        {
+            _pending.TryRemove(id, out _);
+            tcs.TrySetException(new FlorestaElectrumException("Failed to write to the Floresta Electrum connection."));
+            IsConnected = false;
+            throw;
         }
         finally
         {
@@ -335,7 +351,10 @@ public class FlorestaElectrumClient : IAsyncDisposable
         {
             IsConnected = false;
             if (!_intentionalDisconnect && !ct.IsCancellationRequested)
+            {
+                FailPending(new FlorestaElectrumException("Floresta Electrum connection lost."));
                 _ = Task.Run(() => ReconnectLoopAsync());
+            }
         }
     }
 
@@ -382,6 +401,15 @@ public class FlorestaElectrumClient : IAsyncDisposable
         if (!result.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
             return 0;
         return property.GetInt64();
+    }
+
+    private void FailPending(Exception exception)
+    {
+        foreach (var kvp in _pending)
+        {
+            if (_pending.TryRemove(kvp.Key, out var pending))
+                pending.TrySetException(exception);
+        }
     }
 
     private async Task ReconnectLoopAsync()
