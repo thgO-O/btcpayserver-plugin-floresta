@@ -1,0 +1,203 @@
+name: btcpay-floresta-plugin-integration
+
+services:
+  floresta:
+    build:
+      context: ${FLORESTA_REPO:-../Floresta}
+      dockerfile: Dockerfile
+    command:
+      - florestad
+      - --network
+      - regtest
+      - --data-dir
+      - /data
+      - --rpc-address
+      - 0.0.0.0:18442
+      - --electrum-address
+      - 0.0.0.0:20001
+      - --filters-start-height
+      - "0"
+      - --no-backfill
+    expose:
+      - "18442"
+      - "20001"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "floresta-cli", "--network", "regtest", "--rpc-host", "http://127.0.0.1:18442", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 5s
+
+  tests:
+    image: mcr.microsoft.com/dotnet/sdk:10.0
+    user: "${DOTNET_TEST_UID:-1000}:${DOTNET_TEST_GID:-1000}"
+    depends_on:
+      floresta:
+        condition: service_healthy
+    working_dir: /workspace/btcpayserver-floresta-plugin
+    environment:
+      FLORESTA_NETWORK: regtest
+      FLORESTA_RPC_URL: http://floresta:18442
+      FLORESTA_ELECTRUM_HOST: floresta
+      FLORESTA_ELECTRUM_PORT: "20001"
+      FLORESTA_ELECTRUM_TLS: "false"
+      FLORESTA_READY_TIMEOUT_SECONDS: "120"
+      DOTNET_CLI_HOME: /tmp/dotnet-cli
+      NUGET_PACKAGES: /workspace/btcpayserver-floresta-plugin/.nuget/packages
+    volumes:
+      - .:/workspace/btcpayserver-floresta-plugin
+      - ${BTCPAYSERVER_REPO:-../btcpayserver}:/workspace/btcpayserver
+    command:
+      - bash
+      - -lc
+      - >
+        dotnet test BTCPayServer.Plugins.Floresta.IntegrationTests/BTCPayServer.Plugins.Floresta.IntegrationTests.csproj
+        --logger "console;verbosity=normal"
+        -m:1
+        -p:UseSharedCompilation=false
+        -p:RunAnalyzers=false
+        -p:EnableNETAnalyzers=false
+        -nr:false
+
+  postgres:
+    image: postgres:16
+    profiles: ["e2e"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: btcpayserver
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d btcpayserver"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 5s
+
+  bitcoind:
+    image: btcpayserver/bitcoin:31.0
+    profiles: ["e2e"]
+    environment:
+      BITCOIN_NETWORK: regtest
+      BITCOIN_WALLETDIR: "/data/wallets"
+      BITCOIN_EXTRA_ARGS: |-
+        rpcuser=ceiwHEbqWI83
+        rpcpassword=DwubwWsoo3
+        rpcport=43782
+        rpcbind=0.0.0.0:43782
+        rpcallowip=0.0.0.0/0
+        port=39388
+        whitelist=0.0.0.0/0
+        fallbackfee=0.0002
+        minrelaytxfee=0.00001000
+        unsafesqlitesync=1
+    expose:
+      - "43782"
+      - "39388"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD-SHELL", "bitcoin-cli -datadir=/data getblockchaininfo >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 5s
+
+  utreexod:
+    build:
+      context: .
+      dockerfile: docker/utreexod/Dockerfile
+      args:
+        UTREEXOD_REPO: ${UTREEXOD_REPO:-https://github.com/utreexo/utreexod.git}
+        UTREEXOD_REF: ${UTREEXOD_REF:-main}
+    profiles: ["e2e"]
+    command:
+      - utreexod
+      - --regtest
+      - --datadir=/data
+      - --rpcuser=test
+      - --rpcpass=test
+      - --rpclisten=0.0.0.0:38332
+      - --listen=0.0.0.0:38333
+      - --utreexoproofindex
+      - --prune=0
+    expose:
+      - "38332"
+      - "38333"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --insecure --user test:test --header 'content-type: application/json' --data-binary '{\"jsonrpc\":\"1.0\",\"id\":\"health\",\"method\":\"getblockchaininfo\",\"params\":[]}' https://127.0.0.1:38332/ >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 5s
+
+  e2e-tests:
+    image: mcr.microsoft.com/dotnet/sdk:10.0
+    profiles: ["e2e"]
+    depends_on:
+      floresta:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      bitcoind:
+        condition: service_healthy
+      utreexod:
+        condition: service_healthy
+    working_dir: /workspace/btcpayserver-floresta-plugin
+    environment:
+      BTCPAYSERVER_PROJECT: /workspace/btcpayserver/BTCPayServer/BTCPayServer.csproj
+      E2E_POSTGRES: "User ID=postgres;Password=postgres;Include Error Detail=true;Host=postgres;Port=5432;Database=btcpayserver"
+      E2E_READY_TIMEOUT_SECONDS: "240"
+      E2E_BITCOIND_RPC: "server=http://bitcoind:43782;ceiwHEbqWI83:DwubwWsoo3"
+      E2E_BITCOIND_P2P_HOST: bitcoind
+      E2E_BITCOIND_P2P_PORT: "39388"
+      E2E_UTREEXOD_RPC_URL: https://utreexod:38332
+      E2E_UTREEXOD_RPC_USER: test
+      E2E_UTREEXOD_RPC_PASSWORD: test
+      E2E_UTREEXOD_P2P_HOST: utreexod
+      E2E_UTREEXOD_P2P_PORT: "38333"
+      FLORESTA_NETWORK: regtest
+      FLORESTA_RPC_URL: http://floresta:18442
+      FLORESTA_ELECTRUM_HOST: floresta
+      FLORESTA_ELECTRUM_PORT: "20001"
+      FLORESTA_ELECTRUM_TLS: "false"
+      FLORESTA_FILTERS_START_HEIGHT: "0"
+      FLORESTA_GAP_LIMIT: "100"
+      PLAYWRIGHT_HEADLESS: "true"
+      DOTNET_CLI_HOME: /tmp/dotnet-cli
+      NUGET_PACKAGES: /workspace/btcpayserver-floresta-plugin/.nuget/packages
+      DOTNET_TEST_UID: "${DOTNET_TEST_UID:-1000}"
+      DOTNET_TEST_GID: "${DOTNET_TEST_GID:-1000}"
+    volumes:
+      - .:/workspace/btcpayserver-floresta-plugin
+      - ${BTCPAYSERVER_REPO:-../btcpayserver}:/workspace/btcpayserver
+    command:
+      - bash
+      - -lc
+      - >
+        set -euo pipefail;
+        trap 'find /workspace/btcpayserver-floresta-plugin /workspace/btcpayserver -user root -exec chown ${DOTNET_TEST_UID:-1000}:${DOTNET_TEST_GID:-1000} {} + || true' EXIT;
+        dotnet build BTCPayServer.Plugins.Floresta.E2ETests/BTCPayServer.Plugins.Floresta.E2ETests.csproj
+        -m:1
+        -p:UseSharedCompilation=false
+        -p:RunAnalyzers=false
+        -p:EnableNETAnalyzers=false
+        -nr:false;
+        export PATH="$PATH:/tmp/dotnet-cli/.dotnet/tools:/root/.dotnet/tools";
+        if ! command -v playwright >/dev/null 2>&1; then
+          dotnet tool install --global Microsoft.Playwright.CLI;
+        fi;
+        playwright install chromium --with-deps;
+        dotnet test BTCPayServer.Plugins.Floresta.E2ETests/BTCPayServer.Plugins.Floresta.E2ETests.csproj
+        --no-build
+        --logger "console;verbosity=normal"
+        -m:1
+        -p:UseSharedCompilation=false
+        -p:RunAnalyzers=false
+        -p:EnableNETAnalyzers=false
+        -nr:false

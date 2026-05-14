@@ -1,0 +1,9 @@
+bin/
+obj/
+.nuget/
+BTCPayServer.Plugins.Floresta.Tests/bin/
+BTCPayServer.Plugins.Floresta.Tests/obj/
+BTCPayServer.Plugins.Floresta.IntegrationTests/bin/
+BTCPayServer.Plugins.Floresta.IntegrationTests/obj/
+BTCPayServer.Plugins.Floresta.E2ETests/bin/
+BTCPayServer.Plugins.Floresta.E2ETests/obj/

@@ -1,0 +1,56 @@
+services:
+  btcpayserver:
+    image: btcpayserver/btcpayserver:latest
+    depends_on:
+      - postgres
+      - floresta
+    environment:
+      BTCPAY_BTC_BACKEND: floresta
+      FLORESTA_ELECTRUM_HOST: floresta
+      FLORESTA_ELECTRUM_PORT: "50001"
+      FLORESTA_ELECTRUM_TLS: "false"
+      FLORESTA_RPC_URL: http://floresta:8332
+      FLORESTA_GAP_LIMIT: "100"
+      # Development loading path. Replace with the plugin package/install
+      # mechanism used by your BTCPay deployment.
+      BTCPAY_DEBUG_PLUGINS: BTCPayServer.Plugins.Floresta::/plugins/floresta/BTCPayServer.Plugins.Floresta.dll
+    volumes:
+      - btcpay_datadir:/datadir
+      - ./bin/Debug/net10.0:/plugins/floresta:ro
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: btcpay
+      POSTGRES_PASSWORD: btcpay
+      POSTGRES_DB: btcpay
+    volumes:
+      - postgres_datadir:/var/lib/postgresql/data
+
+  floresta:
+    build:
+      context: ../Floresta
+      dockerfile: Dockerfile
+    command:
+      - florestad
+      - --network
+      - bitcoin
+      - --data-dir
+      - /data
+      - --rpc-address
+      - 0.0.0.0:8332
+      - --electrum-address
+      - 0.0.0.0:50001
+      - --filters-start-height
+      - ${FLORESTA_FILTERS_START_HEIGHT:-0}
+      - --no-backfill
+    expose:
+      - "8332"
+      - "50001"
+    volumes:
+      - floresta_datadir:/data
+
+volumes:
+  btcpay_datadir:
+  postgres_datadir:
+  floresta_datadir:

@@ -1,0 +1,120 @@
+@model BTCPayServer.Plugins.Floresta.FlorestaSettings
+@using BTCPayServer.Abstractions.Extensions
+@using BTCPayServer.Abstractions.Models
+@using BTCPayServer.Plugins.Floresta
+@{
+    ViewData.SetLayoutModel(new LayoutModel("floresta-settings", "Floresta")
+        .SetCategory(WellKnownCategories.Server));
+}
+
+<div class="row">
+    <div class="col-xxl-constrain col-xl-8">
+        <form method="post">
+            <div class="alert alert-info">
+                Este modo usa Floresta como backend Bitcoin leve. Ele não instala nem usa Bitcoin Core e não baixa a blockchain inteira.
+                O Floresta ainda precisa armazenar headers, compact filters, estado Utreexo e cache da wallet.
+            </div>
+
+            <div class="form-group">
+                <label class="form-label d-flex align-items-center gap-2">
+                    <input asp-for="Enabled" type="checkbox" class="btcpay-toggle me-0" />
+                    Enabled
+                </label>
+            </div>
+
+            <div class="form-group mt-3">
+                <label asp-for="CryptoCode" class="form-label">Crypto Code</label>
+                <input asp-for="CryptoCode" class="form-control" />
+            </div>
+
+            <div class="form-group mt-3">
+                <label asp-for="Network" class="form-label">Network</label>
+                <select asp-for="Network" class="form-select">
+                    <option value="mainnet">mainnet</option>
+                    <option value="testnet">testnet</option>
+                    <option value="signet">signet</option>
+                    <option value="regtest">regtest</option>
+                </select>
+            </div>
+
+            <div class="row mt-3">
+                <div class="col-md-8">
+                    <label asp-for="ElectrumHost" class="form-label">Floresta Electrum Host</label>
+                    <input asp-for="ElectrumHost" class="form-control" />
+                </div>
+                <div class="col-md-4">
+                    <label asp-for="ElectrumPort" class="form-label">Port</label>
+                    <input asp-for="ElectrumPort" class="form-control" type="number" min="1" max="65535" />
+                </div>
+            </div>
+
+            <div class="form-group mt-3">
+                <label class="form-label d-flex align-items-center gap-2">
+                    <input asp-for="ElectrumUseTls" type="checkbox" class="btcpay-toggle me-0" />
+                    Use TLS for Electrum
+                </label>
+                <span class="text-muted">False by default for local Docker/internal networks.</span>
+            </div>
+
+            <div class="form-group mt-3">
+                <label asp-for="RpcUrl" class="form-label">Floresta RPC URL</label>
+                <input asp-for="RpcUrl" class="form-control" placeholder="http://floresta:8332" />
+                <span class="text-muted">Keep this endpoint private; do not expose it publicly.</span>
+            </div>
+
+            <div class="row mt-3">
+                <div class="col-md-6">
+                    <label asp-for="RpcUser" class="form-label">RPC User</label>
+                    <input asp-for="RpcUser" class="form-control" autocomplete="off" />
+                </div>
+                <div class="col-md-6">
+                    <label asp-for="RpcPassword" class="form-label">RPC Password</label>
+                    <input asp-for="RpcPassword" class="form-control" type="password" autocomplete="new-password" />
+                </div>
+            </div>
+
+            <div class="form-group mt-3">
+                <label asp-for="GapLimit" class="form-label">Gap Limit</label>
+                <input asp-for="GapLimit" class="form-control" type="number" min="5" max="1000" />
+                <span class="text-muted">Number of unused receive/change addresses to keep watched.</span>
+            </div>
+
+            <div class="form-group mt-3">
+                <label asp-for="DefaultRescanStartHeight" class="form-label">Default Rescan Start Height</label>
+                <input asp-for="DefaultRescanStartHeight" class="form-control" type="number" min="0" />
+                <span class="text-muted">Use a recent height for new wallets. Older or unknown wallets need an older start height and more filters.</span>
+            </div>
+
+            <div class="form-group mt-3">
+                <label class="form-label d-flex align-items-center gap-2">
+                    <input asp-for="AutoRegisterDescriptors" type="checkbox" class="btcpay-toggle me-0" />
+                    Auto-register descriptors
+                </label>
+            </div>
+
+            <div class="form-group mt-3">
+                <label class="form-label d-flex align-items-center gap-2">
+                    <input asp-for="AutoRescanOnNewDescriptor" type="checkbox" class="btcpay-toggle me-0" />
+                    Auto-rescan after registering a new descriptor
+                </label>
+            </div>
+
+            <div class="form-group mt-3">
+                <label class="form-label d-flex align-items-center gap-2">
+                    <input asp-for="UseFlorestaAsBitcoinBackend" type="checkbox" class="btcpay-toggle me-0" />
+                    Use Floresta as Bitcoin backend
+                </label>
+            </div>
+
+            <button type="submit" class="btn btn-primary mt-4" id="SaveFlorestaSettings">Save</button>
+            <button type="submit" name="command" value="test" class="btn btn-secondary mt-4">Test Connection</button>
+            <button type="submit" name="command" value="register" class="btn btn-secondary mt-4">Register Descriptors</button>
+            <button type="submit" name="command" value="rescan" class="btn btn-secondary mt-4">Rescan from Height</button>
+        </form>
+
+        @if (ViewBag.StatusMessage != null)
+        {
+            <div class="alert alert-info mt-3">@ViewBag.StatusMessage</div>
+        }
+    </div>
+</div>
