@@ -1,26 +1,37 @@
 services:
   btcpayserver:
-    image: btcpayserver/btcpayserver:latest
+    image: ${BTCPAY_IMAGE:-btcpayserver/btcpayserver:2.3.9}
+    restart: unless-stopped
     depends_on:
       - postgres
       - floresta
+    ports:
+      - "${BTCPAY_HOST_BIND:-127.0.0.1}:${BTCPAY_HOST_PORT:-23000}:8080"
     environment:
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      BTCPAY_NETWORK: mainnet
+      BTCPAY_POSTGRES: "User ID=btcpay;Password=btcpay;Include Error Detail=true;Host=postgres;Port=5432;Database=btcpay"
       BTCPAY_BTC_BACKEND: floresta
+      FLORESTA_ENABLED: "true"
+      FLORESTA_CRYPTO_CODE: BTC
+      FLORESTA_NETWORK: mainnet
       FLORESTA_ELECTRUM_HOST: floresta
       FLORESTA_ELECTRUM_PORT: "50001"
       FLORESTA_ELECTRUM_TLS: "false"
       FLORESTA_RPC_URL: http://floresta:8332
       FLORESTA_GAP_LIMIT: "100"
       FLORESTA_FALLBACK_FEE_SAT_PER_VB: "1"
-      # Development loading path. Replace with the plugin package/install
-      # mechanism used by your BTCPay deployment.
-      BTCPAY_DEBUG_PLUGINS: BTCPayServer.Plugins.Floresta::/plugins/floresta/BTCPayServer.Plugins.Floresta.dll
+      FLORESTA_FILTERS_START_HEIGHT: "${FLORESTA_FILTERS_START_HEIGHT:-0}"
+      FLORESTA_AUTO_REGISTER_DESCRIPTORS: "true"
+      FLORESTA_AUTO_RESCAN_ON_NEW_DESCRIPTOR: "false"
+      FLORESTA_USE_AS_BITCOIN_BACKEND: "true"
     volumes:
       - btcpay_datadir:/datadir
-      - ./bin/Debug/net10.0:/plugins/floresta:ro
+      - ./bin/Debug/net10.0:/root/.btcpayserver/Plugins/BTCPayServer.Plugins.Floresta:ro
 
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: btcpay
       POSTGRES_PASSWORD: btcpay
@@ -30,8 +41,9 @@ services:
 
   floresta:
     build:
-      context: ../Floresta
+      context: ${FLORESTA_REPO:-../Floresta}
       dockerfile: Dockerfile
+    restart: unless-stopped
     command:
       - florestad
       - --network
@@ -43,7 +55,7 @@ services:
       - --electrum-address
       - 0.0.0.0:50001
       - --filters-start-height
-      - ${FLORESTA_FILTERS_START_HEIGHT:-0}
+      - "${FLORESTA_FILTERS_START_HEIGHT:-0}"
       - --no-backfill
     expose:
       - "8332"

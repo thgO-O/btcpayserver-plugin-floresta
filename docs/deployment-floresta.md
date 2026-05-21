@@ -94,6 +94,7 @@ FLORESTA_RPC_URL=http://floresta:8332
 FLORESTA_RPC_USER=
 FLORESTA_RPC_PASSWORD=
 FLORESTA_GAP_LIMIT=100
+FLORESTA_FALLBACK_FEE_SAT_PER_VB=1
 FLORESTA_FILTERS_START_HEIGHT=0
 FLORESTA_AUTO_REGISTER_DESCRIPTORS=true
 FLORESTA_AUTO_RESCAN_ON_NEW_DESCRIPTOR=false
@@ -111,12 +112,17 @@ ElectrumPort=50001
 ElectrumUseTls=false
 RpcUrl=http://floresta:8332
 GapLimit=100
+FallbackFeeRateSatsPerByte=1
 AutoRegisterDescriptors=true
 AutoRescanOnNewDescriptor=false
 UseFlorestaAsBitcoinBackend=true
 ```
 
-The plugin is watch-only. Do not use BTCPay hot wallet creation with this backend; configure an xpub or descriptor and spend from an external wallet or PSBT workflow.
+The plugin is watch-only. When Floresta is active for BTC, the BTCPay generated wallet, hot-wallet, generated watch-only wallet, and seed-import setup paths are hidden or redirected to xpub import. Configure an existing xpub or descriptor and spend from an external wallet or PSBT workflow.
+
+The settings page includes a health panel showing the current Electrum status/version, RPC reachability, chain height, best block, IBD state, validated height, and Utreexo root count. Use Test Connection for an immediate live check after changing endpoints.
+
+`FLORESTA_FALLBACK_FEE_SAT_PER_VB` controls the static fee rate used when `blockchain.estimatefee` is unavailable or invalid and no cached estimate exists. Successful estimates are clamped to at least this value. The default is `1 sat/vB`.
 
 For signet, adjust:
 
