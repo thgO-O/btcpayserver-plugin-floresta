@@ -170,9 +170,7 @@ By default the BTCPay HTTP port is bound to `127.0.0.1:23000`. Set `BTCPAY_HOST_
 
 [docker-compose.local-mainnet.yml](../docker-compose.local-mainnet.yml) is for local development and mounts `./bin/Debug/net10.0` into BTCPay's plugin directory.
 
-[docker-compose.floresta.example.yml](../docker-compose.floresta.example.yml) is a minimal skeleton.
-
-All examples keep Floresta RPC/Electrum internal to the Docker network. Expose those ports only for local development and only to trusted networks.
+Both examples keep Floresta RPC/Electrum internal to the Docker network. Expose those ports only for local development and only to trusted networks.
 
 ## Integration Test Compose
 
