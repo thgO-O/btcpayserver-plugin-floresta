@@ -17,6 +17,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\BTCPayServer.Plugins.Floresta.csproj" />
-    <ProjectReference Include="..\..\btcpayserver\BTCPayServer\BTCPayServer.csproj" />
+    <ProjectReference Include="..\submodules\btcpayserver\BTCPayServer\BTCPayServer.csproj" />
   </ItemGroup>
 </Project>

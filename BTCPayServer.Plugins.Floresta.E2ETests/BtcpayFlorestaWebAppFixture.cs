@@ -31,7 +31,7 @@ public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
 
         var btcpayProject = Path.GetFullPath(
             Environment.GetEnvironmentVariable("BTCPAYSERVER_PROJECT") ??
-            Path.Combine(GetRepoRoot(), "..", "btcpayserver", "BTCPayServer", "BTCPayServer.csproj"));
+            Path.Combine(GetRepoRoot(), "submodules", "btcpayserver", "BTCPayServer", "BTCPayServer.csproj"));
         if (!File.Exists(btcpayProject))
             throw new InvalidOperationException($"BTCPayServer project not found at {btcpayProject}");
 
@@ -88,6 +88,7 @@ public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
         psi.Environment["FLORESTA_ELECTRUM_TLS"] = Environment.GetEnvironmentVariable("FLORESTA_ELECTRUM_TLS") ?? "false";
         psi.Environment["FLORESTA_RPC_URL"] = Environment.GetEnvironmentVariable("FLORESTA_RPC_URL") ?? "http://127.0.0.1:18442";
         psi.Environment["FLORESTA_GAP_LIMIT"] = Environment.GetEnvironmentVariable("FLORESTA_GAP_LIMIT") ?? "100";
+        psi.Environment["FLORESTA_FALLBACK_FEE_SAT_PER_VB"] = Environment.GetEnvironmentVariable("FLORESTA_FALLBACK_FEE_SAT_PER_VB") ?? "1";
         psi.Environment["FLORESTA_FILTERS_START_HEIGHT"] = Environment.GetEnvironmentVariable("FLORESTA_FILTERS_START_HEIGHT") ?? "0";
 
         _process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start BTCPay Server process.");

@@ -44,11 +44,12 @@ services:
       FLORESTA_ELECTRUM_PORT: "20001"
       FLORESTA_ELECTRUM_TLS: "false"
       FLORESTA_READY_TIMEOUT_SECONDS: "120"
+      FLORESTA_FALLBACK_FEE_SAT_PER_VB: "1"
       DOTNET_CLI_HOME: /tmp/dotnet-cli
       NUGET_PACKAGES: /workspace/btcpayserver-floresta-plugin/.nuget/packages
     volumes:
       - .:/workspace/btcpayserver-floresta-plugin
-      - ${BTCPAYSERVER_REPO:-../btcpayserver}:/workspace/btcpayserver
+      - ${BTCPAYSERVER_REPO:-./submodules/btcpayserver}:/workspace/btcpayserver
     command:
       - bash
       - -lc
@@ -112,7 +113,7 @@ services:
       dockerfile: docker/utreexod/Dockerfile
       args:
         UTREEXOD_REPO: ${UTREEXOD_REPO:-https://github.com/utreexo/utreexod.git}
-        UTREEXOD_REF: ${UTREEXOD_REF:-master}
+        UTREEXOD_REF: ${UTREEXOD_REF:-main}
     profiles: ["e2e"]
     command:
       - utreexod
@@ -168,6 +169,7 @@ services:
       FLORESTA_ELECTRUM_TLS: "false"
       FLORESTA_FILTERS_START_HEIGHT: "0"
       FLORESTA_GAP_LIMIT: "100"
+      FLORESTA_FALLBACK_FEE_SAT_PER_VB: "1"
       PLAYWRIGHT_HEADLESS: "true"
       DOTNET_CLI_HOME: /tmp/dotnet-cli
       NUGET_PACKAGES: /workspace/btcpayserver-floresta-plugin/.nuget/packages
@@ -175,7 +177,7 @@ services:
       DOTNET_TEST_GID: "${DOTNET_TEST_GID:-1000}"
     volumes:
       - .:/workspace/btcpayserver-floresta-plugin
-      - ${BTCPAYSERVER_REPO:-../btcpayserver}:/workspace/btcpayserver
+      - ${BTCPAYSERVER_REPO:-./submodules/btcpayserver}:/workspace/btcpayserver
     command:
       - bash
       - -lc

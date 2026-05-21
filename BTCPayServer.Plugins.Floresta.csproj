@@ -8,8 +8,8 @@
     <!-- Plugin specific properties -->
     <PropertyGroup>
         <Product>Floresta</Product>
-        <Description>Floresta backend for BTCPay Server Bitcoin on-chain payments without Bitcoin Core or NBXplorer at runtime.</Description>
-        <Version>1.0.0</Version>
+        <Description>Experimental Floresta backend for BTCPay Server Bitcoin on-chain payments without Bitcoin Core or NBXplorer at runtime.</Description>
+        <Version>0.1.0</Version>
         <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     </PropertyGroup>
     <!-- Plugin development properties -->
@@ -31,22 +31,26 @@
     </ItemDefinitionGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\btcpayserver\BTCPayServer\BTCPayServer.csproj" />
+        <ProjectReference Include="submodules\btcpayserver\BTCPayServer\BTCPayServer.csproj" />
     </ItemGroup>
 
     <ItemGroup>
         <Compile Remove="BTCPayServer.Plugins.Floresta.Tests\**" />
         <Compile Remove="BTCPayServer.Plugins.Floresta.IntegrationTests\**" />
         <Compile Remove="BTCPayServer.Plugins.Floresta.E2ETests\**" />
+        <Compile Remove="submodules\**" />
         <Content Remove="BTCPayServer.Plugins.Floresta.Tests\**" />
         <Content Remove="BTCPayServer.Plugins.Floresta.IntegrationTests\**" />
         <Content Remove="BTCPayServer.Plugins.Floresta.E2ETests\**" />
+        <Content Remove="submodules\**" />
         <EmbeddedResource Remove="BTCPayServer.Plugins.Floresta.Tests\**" />
         <EmbeddedResource Remove="BTCPayServer.Plugins.Floresta.IntegrationTests\**" />
         <EmbeddedResource Remove="BTCPayServer.Plugins.Floresta.E2ETests\**" />
+        <EmbeddedResource Remove="submodules\**" />
         <None Remove="BTCPayServer.Plugins.Floresta.Tests\**" />
         <None Remove="BTCPayServer.Plugins.Floresta.IntegrationTests\**" />
         <None Remove="BTCPayServer.Plugins.Floresta.E2ETests\**" />
+        <None Remove="submodules\**" />
     </ItemGroup>
 
 </Project>
