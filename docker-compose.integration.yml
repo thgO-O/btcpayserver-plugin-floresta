@@ -55,7 +55,8 @@ services:
       - bash
       - -lc
       - >
-        dotnet test BTCPayServer.Plugins.Floresta.IntegrationTests/BTCPayServer.Plugins.Floresta.IntegrationTests.csproj
+        dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj
+        --filter "Integration=Integration"
         --logger "console;verbosity=normal"
         -m:1
         -p:UseSharedCompilation=false
@@ -186,7 +187,7 @@ services:
       - >
         set -euo pipefail;
         trap 'find /workspace/btcpayserver-floresta-plugin /workspace/btcpayserver -user root -exec chown ${DOTNET_TEST_UID:-1000}:${DOTNET_TEST_GID:-1000} {} + || true' EXIT;
-        dotnet build BTCPayServer.Plugins.Floresta.E2ETests/BTCPayServer.Plugins.Floresta.E2ETests.csproj
+        dotnet build BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj
         -m:1
         -p:UseSharedCompilation=false
         -p:RunAnalyzers=false
@@ -197,8 +198,9 @@ services:
           dotnet tool install --global Microsoft.Playwright.CLI;
         fi;
         playwright install chromium --with-deps;
-        dotnet test BTCPayServer.Plugins.Floresta.E2ETests/BTCPayServer.Plugins.Floresta.E2ETests.csproj
+        dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj
         --no-build
+        --filter "Playwright=Playwright"
         --logger "console;verbosity=normal"
         -m:1
         -p:UseSharedCompilation=false

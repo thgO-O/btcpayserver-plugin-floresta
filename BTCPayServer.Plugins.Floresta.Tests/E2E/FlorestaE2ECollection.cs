@@ -1,6 +1,6 @@
 using Xunit;
 
-namespace BTCPayServer.Plugins.Floresta.E2ETests;
+namespace BTCPayServer.Plugins.Floresta.Tests.E2E;
 
 [CollectionDefinition(Name)]
 public sealed class FlorestaE2ECollection : ICollectionFixture<BtcpayFlorestaWebAppFixture>

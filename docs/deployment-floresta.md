@@ -191,7 +191,7 @@ docker compose -f docker-compose.integration.yml down -v
 This starts only:
 
 - `floresta` on regtest;
-- `tests`, a .NET SDK runner that executes `BTCPayServer.Plugins.Floresta.IntegrationTests`.
+- `tests`, a .NET SDK runner that executes the `Integration=Integration` tests from `BTCPayServer.Plugins.Floresta.Tests`.
 
 It does not start `bitcoind` or NBXplorer. These tests cover RPC/Electrum readiness, descriptor registration, descriptor listing, basic rescan behavior, Electrum headers/features/fee, empty scripthash wallet queries, and explicit broadcast errors.
 
@@ -202,4 +202,4 @@ docker compose -f docker-compose.integration.yml --profile e2e up --build --abor
 docker compose -f docker-compose.integration.yml --profile e2e down -v
 ```
 
-This adds temporary Postgres, starts BTCPay Server with `BTCPAY_DEBUG_PLUGINS` pointing at the Floresta plugin, and runs Playwright/Chromium through the settings and invoice payment flow. The browser E2E profile also starts `bitcoind` only as a regtest miner/payer and `utreexod` only as a Utreexo proof peer, matching Floresta's own confirmed-wallet regtest fixtures. `florestad` exposes `sendrawtransaction`, `loaddescriptor` and `rescanblockchain`, but not `generatetoaddress`/`generateblock`, so the test keeps `bitcoind` for funds and blocks. These test-only services are not part of the production deployment and NBXplorer is still not started.
+This adds temporary Postgres, starts BTCPay Server with `BTCPAY_DEBUG_PLUGINS` pointing at the Floresta plugin, and runs the `Playwright=Playwright` tests through the settings and invoice payment flow. The browser E2E profile also starts `bitcoind` only as a regtest miner/payer and `utreexod` only as a Utreexo proof peer, matching Floresta's own confirmed-wallet regtest fixtures. `florestad` exposes `sendrawtransaction`, `loaddescriptor` and `rescanblockchain`, but not `generatetoaddress`/`generateblock`, so the test keeps `bitcoind` for funds and blocks. These test-only services are not part of the production deployment and NBXplorer is still not started.

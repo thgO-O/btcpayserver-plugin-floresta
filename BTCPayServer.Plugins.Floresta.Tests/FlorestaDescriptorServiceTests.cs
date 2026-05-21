@@ -16,7 +16,7 @@ public class FlorestaDescriptorServiceTests
     public void CreatesReceiveAndChangeDescriptorsForSingleSig(ScriptPubKeyType scriptPubKeyType, string wrapper)
     {
         var networkProvider = CreateNetworkProvider("mainnet");
-        var btcpayNetwork = networkProvider.GetNetwork<BTCPayNetwork>("BTC");
+        var btcpayNetwork = GetBitcoinNetwork(networkProvider);
         var factory = btcpayNetwork.NBXplorerNetwork.DerivationStrategyFactory;
         var xpub = new ExtKey().Neuter().GetWif(Network.Main);
         var derivation = factory.CreateDirectDerivationStrategy(xpub, new DerivationStrategyOptions
@@ -42,10 +42,10 @@ public class FlorestaDescriptorServiceTests
     {
         var networkProvider = CreateNetworkProvider(chainName);
         var service = new FlorestaDescriptorService(networkProvider);
-        var network = networkProvider.GetNetwork<BTCPayNetwork>("BTC").NBitcoinNetwork;
+        var btcpayNetwork = GetBitcoinNetwork(networkProvider);
+        var network = btcpayNetwork.NBitcoinNetwork;
         var xpub = new ExtKey().Neuter().GetWif(network);
-        var derivation = networkProvider
-            .GetNetwork<BTCPayNetwork>("BTC")
+        var derivation = btcpayNetwork
             .NBXplorerNetwork
             .DerivationStrategyFactory
             .CreateDirectDerivationStrategy(xpub, new DerivationStrategyOptions
@@ -63,8 +63,9 @@ public class FlorestaDescriptorServiceTests
     public void RejectsMultisigInMvp()
     {
         var networkProvider = CreateNetworkProvider("mainnet");
-        var network = networkProvider.GetNetwork<BTCPayNetwork>("BTC").NBitcoinNetwork;
-        var factory = networkProvider.GetNetwork<BTCPayNetwork>("BTC").NBXplorerNetwork.DerivationStrategyFactory;
+        var btcpayNetwork = GetBitcoinNetwork(networkProvider);
+        var network = btcpayNetwork.NBitcoinNetwork;
+        var factory = btcpayNetwork.NBXplorerNetwork.DerivationStrategyFactory;
         var first = new ExtKey().Neuter().GetWif(network);
         var second = new ExtKey().Neuter().GetWif(network);
         var derivation = factory.CreateMultiSigDerivationStrategy(
@@ -114,5 +115,11 @@ public class FlorestaDescriptorServiceTests
             new BTCPayNetworkBase[] { btc },
             nbxplorerNetworkProvider,
             new Logs());
+    }
+
+    private static BTCPayNetwork GetBitcoinNetwork(BTCPayNetworkProvider networkProvider)
+    {
+        return networkProvider.GetNetwork<BTCPayNetwork>("BTC") ??
+               throw new InvalidOperationException("BTC network was not configured for the test.");
     }
 }

@@ -13,7 +13,7 @@ public class FlorestaBackendModeTests
     [InlineData("yes")]
     [InlineData("on")]
     [InlineData(" true ")]
-    public void EnablesBackendReplacementFromEnvironment(string value)
+    public void EnablesBackendReplacementFromEnvironment(string? value)
     {
         WithEnvironment(value, () =>
         {
@@ -29,7 +29,7 @@ public class FlorestaBackendModeTests
     [InlineData("no")]
     [InlineData("off")]
     [InlineData("invalid")]
-    public void KeepsBackendReplacementDisabledByDefault(string value)
+    public void KeepsBackendReplacementDisabledByDefault(string? value)
     {
         WithEnvironment(value, () =>
         {
@@ -37,6 +37,6 @@ public class FlorestaBackendModeTests
         });
     }
 
-    private static void WithEnvironment(string value, Action action) =>
+    private static void WithEnvironment(string? value, Action action) =>
         WithBackendReplacementEnvironment(value, action);
 }

@@ -12,7 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
-namespace BTCPayServer.Plugins.Floresta.E2ETests;
+namespace BTCPayServer.Plugins.Floresta.Tests.E2E;
 
 public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
 {

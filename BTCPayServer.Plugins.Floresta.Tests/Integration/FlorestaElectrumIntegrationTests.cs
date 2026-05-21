@@ -5,9 +5,10 @@ using System.Threading.Tasks;
 using NBitcoin;
 using Xunit;
 
-namespace BTCPayServer.Plugins.Floresta.IntegrationTests;
+namespace BTCPayServer.Plugins.Floresta.Tests.Integration;
 
 [Collection(FlorestaIntegrationCollection.Name)]
+[Trait("Integration", "Integration")]
 public class FlorestaElectrumIntegrationTests
 {
     private readonly FlorestaIntegrationFixture _fixture;

@@ -15,7 +15,7 @@ using NBitcoin.RPC;
 using static Microsoft.Playwright.Assertions;
 using Xunit;
 
-namespace BTCPayServer.Plugins.Floresta.E2ETests;
+namespace BTCPayServer.Plugins.Floresta.Tests.E2E;
 
 [Collection(FlorestaE2ECollection.Name)]
 public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime

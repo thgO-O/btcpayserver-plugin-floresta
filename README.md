@@ -70,10 +70,10 @@ Build only the plugin:
 dotnet build BTCPayServer.Plugins.Floresta.csproj --no-dependencies
 ```
 
-Run focused tests:
+Run focused unit tests. Integration and E2E tests live in the same test project and are selected by xUnit traits:
 
 ```bash
-dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj --no-build --no-restore
+dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj --filter "Integration!=Integration&Playwright!=Playwright"
 ```
 
 Run a mainnet PoC stack without Bitcoin Core, NBXplorer, or a local debug plugin mount:
@@ -98,7 +98,7 @@ docker compose -f docker-compose.integration.yml --profile e2e up --build --abor
 docker compose -f docker-compose.integration.yml --profile e2e down -v
 ```
 
-The E2E profile adds temporary Postgres, starts a real BTCPay Server process with `BTCPAY_DEBUG_PLUGINS` pointing to this plugin, opens Chromium via Playwright, registers admin users, saves Floresta settings, checks the health panel, verifies generated/hot/seed wallet setup paths are hidden or blocked, imports a BTC native SegWit xpub, creates an invoice, pays it, mines one regtest block, and checks that the invoice settles and the wallet transaction appears.
+The test suite is consolidated in `BTCPayServer.Plugins.Floresta.Tests`. The integration compose runs the `Integration=Integration` trait, and the E2E profile runs the `Playwright=Playwright` trait. The E2E profile adds temporary Postgres, starts a real BTCPay Server process with `BTCPAY_DEBUG_PLUGINS` pointing to this plugin, opens Chromium via Playwright, registers admin users, saves Floresta settings, checks the health panel, verifies generated/hot/seed wallet setup paths are hidden or blocked, imports a BTC native SegWit xpub, creates an invoice, pays it, mines one regtest block, and checks that the invoice settles and the wallet transaction appears.
 
 The browser E2E topology is `florestad + bitcoind + utreexod`, matching Floresta's own confirmed-wallet regtest fixtures. The `utreexod` image is test-only and is built from `https://github.com/utreexo/utreexod.git` at `UTREEXOD_REF`, defaulting to `main`; override `UTREEXOD_REPO` or `UTREEXOD_REF` if a pinned fork or commit is needed. `bitcoind` remains only a transient regtest miner/payer for this browser test. Neither `bitcoind` nor `utreexod` is part of the runtime deployment, and NBXplorer is still not started.
 

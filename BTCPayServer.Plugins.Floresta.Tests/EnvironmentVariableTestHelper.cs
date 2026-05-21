@@ -6,7 +6,7 @@ internal static class EnvironmentVariableTestHelper
 {
     private static readonly object EnvLock = new();
 
-    public static void WithBackendReplacementEnvironment(string value, Action action)
+    public static void WithBackendReplacementEnvironment(string? value, Action action)
     {
         lock (EnvLock)
         {

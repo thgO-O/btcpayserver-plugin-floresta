@@ -1,6 +1,6 @@
 using Xunit;
 
-namespace BTCPayServer.Plugins.Floresta.IntegrationTests;
+namespace BTCPayServer.Plugins.Floresta.Tests.Integration;
 
 [CollectionDefinition(Name)]
 public sealed class FlorestaIntegrationCollection : ICollectionFixture<FlorestaIntegrationFixture>

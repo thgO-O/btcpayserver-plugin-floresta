@@ -4,7 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
-namespace BTCPayServer.Plugins.Floresta.IntegrationTests;
+namespace BTCPayServer.Plugins.Floresta.Tests.Integration;
 
 public sealed class FlorestaIntegrationFixture : IAsyncLifetime
 {
@@ -22,7 +22,7 @@ public sealed class FlorestaIntegrationFixture : IAsyncLifetime
         GapLimit = 100
     };
 
-    public FlorestaRpcClient Rpc { get; private set; }
+    public FlorestaRpcClient Rpc { get; private set; } = null!;
 
     public async Task InitializeAsync()
     {
@@ -32,7 +32,7 @@ public sealed class FlorestaIntegrationFixture : IAsyncLifetime
                 ? seconds
                 : 90);
         var deadline = DateTimeOffset.UtcNow + timeout;
-        Exception last = null;
+        Exception? last = null;
 
         while (DateTimeOffset.UtcNow < deadline)
         {
