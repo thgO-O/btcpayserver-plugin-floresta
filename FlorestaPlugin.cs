@@ -5,9 +5,11 @@ using BTCPayServer.Abstractions.Models;
 using BTCPayServer.HostedServices;
 using BTCPayServer.Payments.Bitcoin;
 using BTCPayServer.Plugins.Floresta.Data;
+using BTCPayServer.Plugins.Floresta.Filters;
 using BTCPayServer.Plugins.Floresta.Services;
 using BTCPayServer.Services;
 using BTCPayServer.Services.Fees;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace BTCPayServer.Plugins.Floresta;
@@ -108,6 +110,10 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         // ──────────────────────────────────────────────
 
         services.AddUIExtension("server-nav", "/Views/Shared/Floresta/NavExtension.cshtml");
+        services.AddUIExtension("onchain-wallet-setup-post-body", "/Views/Shared/Floresta/WatchOnlyWalletSetup.cshtml");
+        services.AddScoped<FlorestaWatchOnlyWalletSetupFilter>();
+        services.Configure<MvcOptions>(options =>
+            options.Filters.AddService<FlorestaWatchOnlyWalletSetupFilter>());
     }
 
     private static void RemoveByImplementation<T>(IServiceCollection services)

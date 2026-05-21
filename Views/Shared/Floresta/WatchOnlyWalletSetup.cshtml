@@ -1,0 +1,33 @@
+@model BTCPayServer.Models.StoreViewModels.WalletSetupViewModel
+@using BTCPayServer.Plugins.Floresta
+@using BTCPayServer.Services
+@inject SettingsRepository SettingsRepository
+@{
+    var settings = await SettingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+    var isActive = settings.Enabled &&
+                   settings.UseFlorestaAsBitcoinBackend &&
+                   string.Equals(settings.CryptoCode, "BTC", StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(Model?.CryptoCode, "BTC", StringComparison.OrdinalIgnoreCase);
+}
+
+@if (isActive)
+{
+    <style>
+        #GenerateWalletLink,
+        #GenerateHotwalletLink,
+        #GenerateWatchonlyLink,
+        #ImportSeedLink {
+            display: none !important;
+        }
+    </style>
+    <div class="alert alert-info mt-4" id="FlorestaWatchOnlyWalletSetupNotice">
+        Floresta accepts existing xpubs/descriptors only. It does not create seeds, store private keys, or enable BTCPay hot-wallet signing.
+    </div>
+    <script>
+        document.querySelectorAll('#GenerateWalletLink,#GenerateHotwalletLink,#GenerateWatchonlyLink,#ImportSeedLink')
+            .forEach(function (element) {
+                var group = element.closest('.list-group');
+                (group || element).remove();
+            });
+    </script>
+}
