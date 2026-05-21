@@ -1,13 +1,12 @@
 using System;
-using System.Collections.Generic;
 using System.Linq;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Client;
 using BTCPayServer.Controllers;
 using BTCPayServer.Payments;
+using BTCPayServer.Plugins.Floresta.Services;
 using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services;
 using BTCPayServer.Services.Stores;
@@ -25,31 +24,37 @@ public class UIFlorestaController : Controller
     private readonly FlorestaDescriptorService _descriptorService;
     private readonly StoreRepository _storeRepository;
     private readonly PaymentMethodHandlerDictionary _handlers;
+    private readonly FlorestaStatusMonitor _statusMonitor;
 
     public UIFlorestaController(
         SettingsRepository settingsRepository,
         FlorestaElectrumClient electrumClient,
         FlorestaDescriptorService descriptorService,
         StoreRepository storeRepository,
-        PaymentMethodHandlerDictionary handlers)
+        PaymentMethodHandlerDictionary handlers,
+        FlorestaStatusMonitor statusMonitor)
     {
         _settingsRepository = settingsRepository;
         _electrumClient = electrumClient;
         _descriptorService = descriptorService;
         _storeRepository = storeRepository;
         _handlers = handlers;
+        _statusMonitor = statusMonitor;
     }
 
     [HttpGet("~/server/floresta")]
     public async Task<IActionResult> Settings()
     {
         var settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+        SetHealthViewBag();
         return View(settings);
     }
 
     [HttpPost("~/server/floresta")]
     public async Task<IActionResult> Settings(FlorestaSettings settings, string command)
     {
+        SetHealthViewBag();
+
         if (command == "test")
         {
             try
@@ -64,8 +69,20 @@ public class UIFlorestaController : Controller
 
                 var rpcClient = new FlorestaRpcClient(settings, NullLogger<FlorestaRpcClient>.Instance);
                 var blockchainInfo = await rpcClient.GetBlockchainInfoAsync(cts.Token);
+                var chainInfo = FlorestaChainInfoParser.Parse(blockchainInfo);
+                ViewBag.Health = new FlorestaHealthSnapshot(
+                    "Reachable",
+                    sw,
+                    true,
+                    chainInfo.Height,
+                    chainInfo.BestBlockHash,
+                    chainInfo.IsInitialBlockDownload,
+                    chainInfo.ValidatedHeight,
+                    chainInfo.UtreexoRootCount,
+                    DateTimeOffset.UtcNow,
+                    null);
                 ViewBag.StatusMessage =
-                    $"Connection successful. Electrum: {sw} protocol {pv}. RPC {FormatBlockchainInfo(blockchainInfo)}.";
+                    $"Connection successful. Electrum: {sw} protocol {pv}. RPC {FlorestaChainInfoParser.Format(chainInfo)}.";
             }
             catch (Exception ex)
             {
@@ -153,69 +170,9 @@ public class UIFlorestaController : Controller
         return new DescriptorRegistrationResult(storesScanned, storesWithWallet, alreadyRegistered, registered);
     }
 
-    private static string FormatBlockchainInfo(JsonElement blockchainInfo)
+    private void SetHealthViewBag()
     {
-        var height = GetInt32(blockchainInfo, "blocks") ?? GetInt32(blockchainInfo, "height");
-        var bestBlock = GetString(blockchainInfo, "bestblockhash") ?? GetString(blockchainInfo, "best_block");
-        var ibd = GetBool(blockchainInfo, "initialblockdownload") ?? GetBool(blockchainInfo, "ibd");
-        var validated = GetInt32(blockchainInfo, "validated");
-        var rootCount = GetInt32(blockchainInfo, "root_count");
-
-        var parts = new List<string>
-        {
-            $"height: {height?.ToString() ?? "unknown"}"
-        };
-
-        if (!string.IsNullOrEmpty(bestBlock))
-            parts.Add($"best: {ShortHash(bestBlock)}");
-        if (ibd is not null)
-            parts.Add($"ibd: {ibd.Value.ToString().ToLowerInvariant()}");
-        if (validated is not null)
-            parts.Add($"validated: {validated.Value}");
-        if (rootCount is not null)
-            parts.Add($"roots: {rootCount.Value}");
-
-        return string.Join(", ", parts);
-    }
-
-    private static int? GetInt32(JsonElement element, string propertyName)
-    {
-        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
-            return null;
-
-        if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var value))
-            return value;
-
-        if (property.ValueKind == JsonValueKind.String && int.TryParse(property.GetString(), out value))
-            return value;
-
-        return null;
-    }
-
-    private static bool? GetBool(JsonElement element, string propertyName)
-    {
-        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
-            return null;
-
-        if (property.ValueKind is JsonValueKind.True or JsonValueKind.False)
-            return property.GetBoolean();
-
-        if (property.ValueKind == JsonValueKind.String && bool.TryParse(property.GetString(), out var value))
-            return value;
-
-        return null;
-    }
-
-    private static string GetString(JsonElement element, string propertyName)
-    {
-        return element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
-            ? property.GetString()
-            : null;
-    }
-
-    private static string ShortHash(string hash)
-    {
-        return hash.Length <= 16 ? hash : $"{hash[..8]}...{hash[^8..]}";
+        ViewBag.Health = _statusMonitor.GetHealthSnapshot();
     }
 
     private sealed record DescriptorRegistrationResult(

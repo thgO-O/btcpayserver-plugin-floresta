@@ -33,6 +33,10 @@ public class FlorestaStatusMonitor : IHostedService
     public bool? IsInitialBlockDownload { get; private set; }
     public int? ValidatedHeight { get; private set; }
     public int? UtreexoRootCount { get; private set; }
+    public bool? RpcReachable { get; private set; }
+    public DateTimeOffset? LastUpdated { get; private set; }
+    public string LastError { get; private set; }
+    public FlorestaChainInfo ChainInfo { get; private set; } = new();
 
     public FlorestaStatusMonitor(
         FlorestaElectrumClient client,
@@ -103,6 +107,9 @@ public class FlorestaStatusMonitor : IHostedService
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "Cannot connect to Floresta backend");
+                RpcReachable = false;
+                LastError = ex.Message;
+                LastUpdated = DateTimeOffset.UtcNow;
                 SetState(NBXplorerState.NotConnected, oldState, null, null);
                 return;
             }
@@ -119,6 +126,9 @@ public class FlorestaStatusMonitor : IHostedService
 
             var blockchainInfo = await _rpcClient.GetBlockchainInfoAsync(ct);
             UpdateChainInfo(blockchainInfo);
+            RpcReachable = true;
+            LastError = null;
+            LastUpdated = DateTimeOffset.UtcNow;
 
             _ = await _client.ServerFeaturesAsync(ct);
 
@@ -130,6 +140,9 @@ public class FlorestaStatusMonitor : IHostedService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Floresta health check failed");
+            RpcReachable = false;
+            LastError = ex.Message;
+            LastUpdated = DateTimeOffset.UtcNow;
             State = NBXplorerState.NotConnected;
             SetState(NBXplorerState.NotConnected, oldState, null, null);
         }
@@ -164,52 +177,34 @@ public class FlorestaStatusMonitor : IHostedService
 
     private void UpdateChainInfo(JsonElement blockchainInfo)
     {
-        TipHeight = GetInt32(blockchainInfo, "blocks") ?? GetInt32(blockchainInfo, "height") ?? TipHeight;
-        BestBlockHash = GetString(blockchainInfo, "bestblockhash") ?? GetString(blockchainInfo, "best_block") ?? BestBlockHash;
-        IsInitialBlockDownload = GetBool(blockchainInfo, "initialblockdownload") ?? GetBool(blockchainInfo, "ibd") ?? IsInitialBlockDownload;
-        ValidatedHeight = GetInt32(blockchainInfo, "validated") ?? ValidatedHeight;
-        UtreexoRootCount = GetInt32(blockchainInfo, "root_count") ?? UtreexoRootCount;
-    }
-
-    private static int? GetInt32(JsonElement element, string propertyName)
-    {
-        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
-            return null;
-
-        if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var value))
-            return value;
-
-        if (property.ValueKind == JsonValueKind.String && int.TryParse(property.GetString(), out value))
-            return value;
-
-        return null;
-    }
-
-    private static bool? GetBool(JsonElement element, string propertyName)
-    {
-        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
-            return null;
-
-        if (property.ValueKind is JsonValueKind.True or JsonValueKind.False)
-            return property.GetBoolean();
-
-        if (property.ValueKind == JsonValueKind.String && bool.TryParse(property.GetString(), out var value))
-            return value;
-
-        return null;
-    }
-
-    private static string GetString(JsonElement element, string propertyName)
-    {
-        return element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
-            ? property.GetString()
-            : null;
+        var parsed = FlorestaChainInfoParser.Parse(blockchainInfo);
+        ChainInfo = parsed;
+        TipHeight = parsed.Height ?? TipHeight;
+        BestBlockHash = parsed.BestBlockHash ?? BestBlockHash;
+        IsInitialBlockDownload = parsed.IsInitialBlockDownload ?? IsInitialBlockDownload;
+        ValidatedHeight = parsed.ValidatedHeight ?? ValidatedHeight;
+        UtreexoRootCount = parsed.UtreexoRootCount ?? UtreexoRootCount;
     }
 
     private NBitcoin.ChainName GetChainName()
     {
         var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
         return network?.NBitcoinNetwork?.ChainName ?? NBitcoin.ChainName.Mainnet;
+    }
+
+    public FlorestaHealthSnapshot GetHealthSnapshot()
+    {
+        return new FlorestaHealthSnapshot(
+            State.ToString(),
+            ServerVersion ?? "unknown",
+            RpcReachable,
+            ChainInfo.Height ?? (TipHeight > 0 ? TipHeight : null),
+            ChainInfo.BestBlockHash ?? BestBlockHash,
+            ChainInfo.IsInitialBlockDownload ?? IsInitialBlockDownload,
+            ChainInfo.ValidatedHeight ?? ValidatedHeight,
+            ChainInfo.UtreexoRootCount ?? UtreexoRootCount,
+            LastUpdated,
+            LastError);
     }
 
     private void SetState(NBXplorerState newState, NBXplorerState oldState, StatusResult status, GetMempoolInfoResponse mempoolInfo)

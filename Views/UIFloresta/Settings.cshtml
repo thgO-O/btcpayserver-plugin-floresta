@@ -2,9 +2,11 @@
 @using BTCPayServer.Abstractions.Extensions
 @using BTCPayServer.Abstractions.Models
 @using BTCPayServer.Plugins.Floresta
+@using BTCPayServer.Plugins.Floresta.Services
 @{
     ViewData.SetLayoutModel(new LayoutModel("floresta-settings", "Floresta")
         .SetCategory(WellKnownCategories.Server));
+    var health = ViewBag.Health as FlorestaHealthSnapshot;
 }
 
 <div class="row">
@@ -18,6 +20,49 @@
                 The Floresta plugin is watch-only. It registers xpubs/descriptors and tracks payments, but it does not create seeds, store private keys, or sign transactions.
                 Use an external wallet or PSBT workflow for spending.
             </div>
+
+            @if (health is not null)
+            {
+                var rpcStatus = health.RpcReachable switch
+                {
+                    true => "Reachable",
+                    false => "Unavailable",
+                    _ => "Unknown"
+                };
+                var ibdStatus = health.IsInitialBlockDownload switch
+                {
+                    true => "Yes",
+                    false => "No",
+                    _ => "Unknown"
+                };
+                <section class="border rounded p-3 mt-4" id="FlorestaHealthPanel">
+                    <h2 class="h4 mb-3">Floresta health</h2>
+                    <dl class="row mb-0">
+                        <dt class="col-sm-4">Electrum status</dt>
+                        <dd class="col-sm-8" id="FlorestaHealthElectrumStatus">@health.ElectrumStatus</dd>
+                        <dt class="col-sm-4">Electrum version</dt>
+                        <dd class="col-sm-8" id="FlorestaHealthElectrumVersion">@health.ElectrumVersion</dd>
+                        <dt class="col-sm-4">RPC</dt>
+                        <dd class="col-sm-8" id="FlorestaHealthRpcStatus">@rpcStatus</dd>
+                        <dt class="col-sm-4">Height</dt>
+                        <dd class="col-sm-8" id="FlorestaHealthHeight">@(health.Height?.ToString() ?? "Unknown")</dd>
+                        <dt class="col-sm-4">Best block</dt>
+                        <dd class="col-sm-8 text-break" id="FlorestaHealthBestBlock">@health.ShortBestBlockHash</dd>
+                        <dt class="col-sm-4">IBD</dt>
+                        <dd class="col-sm-8" id="FlorestaHealthIbd">@ibdStatus</dd>
+                        <dt class="col-sm-4">Validated height</dt>
+                        <dd class="col-sm-8" id="FlorestaHealthValidated">@(health.ValidatedHeight?.ToString() ?? "Unknown")</dd>
+                        <dt class="col-sm-4">Utreexo roots</dt>
+                        <dd class="col-sm-8" id="FlorestaHealthRoots">@(health.UtreexoRootCount?.ToString() ?? "Unknown")</dd>
+                        <dt class="col-sm-4">Updated</dt>
+                        <dd class="col-sm-8" id="FlorestaHealthUpdated">@(health.LastUpdated?.ToString("u") ?? "Never")</dd>
+                    </dl>
+                    @if (!string.IsNullOrEmpty(health.LastError))
+                    {
+                        <div class="text-warning mt-2" id="FlorestaHealthError">@health.LastError</div>
+                    }
+                </section>
+            }
 
             <div class="form-group">
                 <label class="form-label d-flex align-items-center gap-2">
@@ -81,6 +126,12 @@
                 <label asp-for="GapLimit" class="form-label">Gap Limit</label>
                 <input asp-for="GapLimit" class="form-control" type="number" min="5" max="1000" />
                 <span class="text-muted">Number of unused receive/change addresses to keep watched.</span>
+            </div>
+
+            <div class="form-group mt-3">
+                <label asp-for="FallbackFeeRateSatsPerByte" class="form-label">Fallback fee rate (sat/vB)</label>
+                <input asp-for="FallbackFeeRateSatsPerByte" class="form-control" type="number" min="0.1" step="any" />
+                <span class="text-muted">Used when Electrum fee estimation is unavailable or returns an invalid value.</span>
             </div>
 
             <div class="form-group mt-3">

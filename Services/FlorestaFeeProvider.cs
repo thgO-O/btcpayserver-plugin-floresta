@@ -13,50 +13,41 @@ namespace BTCPayServer.Plugins.Floresta.Services;
 public class FlorestaFeeProvider : IFeeProvider
 {
     private readonly FlorestaElectrumClient _client;
+    private readonly SettingsRepository _settingsRepository;
     private readonly ConcurrentDictionary<int, (FeeRate Rate, DateTimeOffset CachedAt)> _cache = new();
     private static readonly TimeSpan CacheDuration = TimeSpan.FromSeconds(30);
 
-    public FlorestaFeeProvider(FlorestaElectrumClient client)
+    public FlorestaFeeProvider(
+        FlorestaElectrumClient client,
+        SettingsRepository settingsRepository)
     {
         _client = client;
+        _settingsRepository = settingsRepository;
     }
 
     public async Task<FeeRate> GetFeeRateAsync(int blockTarget = 20)
     {
+        var settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+        var fallback = settings.FallbackFeeRateSatsPerByte;
+
         if (_cache.TryGetValue(blockTarget, out var cached) &&
             DateTimeOffset.UtcNow - cached.CachedAt < CacheDuration)
         {
-            return cached.Rate;
+            return FlorestaFeePolicy.ClampToFallback(cached.Rate, fallback);
         }
 
         try
         {
             var btcPerKb = await _client.EstimateFeeAsync(blockTarget, default);
-
-            FeeRate rate;
-            if (btcPerKb <= 0)
-            {
-                // Server can't estimate, use minimum
-                rate = new FeeRate(1.0m);
-            }
-            else
-            {
-                // Convert BTC/kB to sat/vB
-                // 1 BTC = 100,000,000 sat, 1 kB = 1000 bytes
-                // sat/vB = (BTC/kB * 100,000,000) / 1000 = BTC/kB * 100,000
-                var satPerByte = btcPerKb * 100_000m;
-                rate = new FeeRate(satPerByte);
-            }
+            if (!FlorestaFeePolicy.TryCreateFeeRateFromEstimate(btcPerKb, fallback, out var rate))
+                return FlorestaFeePolicy.SelectFallbackFeeRate(blockTarget, _cache, fallback);
 
             _cache[blockTarget] = (rate, DateTimeOffset.UtcNow);
             return rate;
         }
         catch
         {
-            // Return cached value if available, otherwise minimum
-            if (_cache.TryGetValue(blockTarget, out var stale))
-                return stale.Rate;
-            return new FeeRate(1.0m);
+            return FlorestaFeePolicy.SelectFallbackFeeRate(blockTarget, _cache, fallback);
         }
     }
 }

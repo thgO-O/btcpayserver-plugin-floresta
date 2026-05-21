@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 
 namespace BTCPayServer.Plugins.Floresta;
 
@@ -20,6 +21,7 @@ public class FlorestaSettings
         AutoRegisterDescriptors = GetBool("FLORESTA_AUTO_REGISTER_DESCRIPTORS", AutoRegisterDescriptors);
         AutoRescanOnNewDescriptor = GetBool("FLORESTA_AUTO_RESCAN_ON_NEW_DESCRIPTOR", AutoRescanOnNewDescriptor);
         UseFlorestaAsBitcoinBackend = GetBool("FLORESTA_USE_AS_BITCOIN_BACKEND", UseFlorestaAsBitcoinBackend);
+        FallbackFeeRateSatsPerByte = GetDecimal("FLORESTA_FALLBACK_FEE_SAT_PER_VB", FallbackFeeRateSatsPerByte);
     }
 
     public bool Enabled { get; set; } = true;
@@ -35,6 +37,13 @@ public class FlorestaSettings
     public bool AutoRegisterDescriptors { get; set; } = true;
     public bool AutoRescanOnNewDescriptor { get; set; }
     public bool UseFlorestaAsBitcoinBackend { get; set; } = true;
+    public const decimal DefaultFallbackFeeRateSatsPerByte = 1.0m;
+    private decimal _fallbackFeeRateSatsPerByte = DefaultFallbackFeeRateSatsPerByte;
+    public decimal FallbackFeeRateSatsPerByte
+    {
+        get => _fallbackFeeRateSatsPerByte;
+        set => _fallbackFeeRateSatsPerByte = value > 0 ? value : DefaultFallbackFeeRateSatsPerByte;
+    }
 
     public const int MaxGapLimit = 1000;
     private int _gapLimit = 100;
@@ -74,6 +83,14 @@ public class FlorestaSettings
     {
         var value = Environment.GetEnvironmentVariable(name);
         return int.TryParse(value, out var parsed) ? parsed : fallback;
+    }
+
+    private static decimal GetDecimal(string name, decimal fallback)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : fallback;
     }
 
     private static int? GetNullableInt(string name, int? fallback)

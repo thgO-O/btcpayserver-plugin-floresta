@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Plugins.Floresta.Data;
+using BTCPayServer.Plugins.Floresta.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
@@ -16,6 +17,7 @@ namespace BTCPayServer.Plugins.Floresta;
 public class FlorestaWalletTracker
 {
     private readonly FlorestaElectrumClient _client;
+    private readonly FlorestaFeeProvider _feeProvider;
     private readonly FlorestaRpcClient _rpcClient;
     private readonly FlorestaDescriptorService _descriptorService;
     private readonly FlorestaDbContextFactory _dbFactory;
@@ -34,6 +36,7 @@ public class FlorestaWalletTracker
 
     public FlorestaWalletTracker(
         FlorestaElectrumClient client,
+        FlorestaFeeProvider feeProvider,
         FlorestaRpcClient rpcClient,
         FlorestaDescriptorService descriptorService,
         FlorestaDbContextFactory dbFactory,
@@ -41,6 +44,7 @@ public class FlorestaWalletTracker
         ILogger<FlorestaWalletTracker> logger)
     {
         _client = client;
+        _feeProvider = feeProvider;
         _rpcClient = rpcClient;
         _descriptorService = descriptorService;
         _dbFactory = dbFactory;
@@ -691,31 +695,9 @@ public class FlorestaWalletTracker
 
     public async Task<GetFeeRateResult> GetFeeRateAsync(int blockTarget, CancellationToken ct)
     {
-        decimal btcPerKb;
-        try
-        {
-            btcPerKb = await _client.EstimateFeeAsync(blockTarget, ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Floresta fee estimation unavailable, using static fallback");
-            btcPerKb = 0;
-        }
-
-        FeeRate rate;
-        if (btcPerKb <= 0)
-        {
-            rate = new FeeRate(1.0m);
-        }
-        else
-        {
-            var satPerByte = btcPerKb * 100_000m;
-            rate = new FeeRate(satPerByte);
-        }
-
         return new GetFeeRateResult
         {
-            FeeRate = rate,
+            FeeRate = await _feeProvider.GetFeeRateAsync(blockTarget),
             BlockCount = blockTarget
         };
     }
