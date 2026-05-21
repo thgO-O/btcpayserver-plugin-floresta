@@ -3,7 +3,7 @@
 FROM golang:1.25-bookworm AS build
 
 ARG UTREEXOD_REPO=https://github.com/utreexo/utreexod.git
-ARG UTREEXOD_REF=master
+ARG UTREEXOD_REF=main
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \

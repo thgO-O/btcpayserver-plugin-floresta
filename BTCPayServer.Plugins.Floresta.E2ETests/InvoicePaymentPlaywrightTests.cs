@@ -45,8 +45,8 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         var bitcoin = CreateBitcoinRpcClient();
         var bitcoinWallet = await PrepareBitcoinWalletAsync(bitcoin);
         await ConnectRegtestMeshAsync(bitcoin);
-        var initialBlocks = await FundBitcoinMinerAsync(bitcoinWallet);
-        await SubmitBlocksToUtreexodAsync(bitcoin, initialBlocks);
+        await FundBitcoinMinerAsync(bitcoinWallet);
+        await SubmitBitcoinChainToUtreexodAsync(bitcoin);
         await WaitForUtreexodChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
         await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
 
@@ -65,8 +65,8 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         var txId = await bitcoinWallet.SendToAddressAsync(BitcoinAddress.Create(invoiceAddress!, Network.RegTest), Money.Coins(0.0001m));
         var rawTx = await bitcoin.GetRawTransactionAsync(txId);
         await FlorestaRpcAsync("sendrawtransaction", new object[] { rawTx.ToHex() });
-        var confirmationBlocks = await bitcoinWallet.GenerateToAddressAsync(1, await bitcoinWallet.GetNewAddressAsync());
-        await SubmitBlocksToUtreexodAsync(bitcoin, confirmationBlocks.Select(blockHash => blockHash.ToString()).ToArray());
+        await bitcoinWallet.GenerateToAddressAsync(1, await bitcoinWallet.GetNewAddressAsync());
+        await SubmitBitcoinChainToUtreexodAsync(bitcoin);
         await WaitForUtreexodChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
         await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
 
@@ -191,7 +191,13 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
     private static async Task AddBitcoinPeerAsync(RPCClient bitcoin, string endpoint)
     {
-        await bitcoin.SendCommandAsync("addnode", endpoint, "add");
+        try
+        {
+            await bitcoin.SendCommandAsync("addnode", endpoint, "add");
+        }
+        catch (RPCException ex) when (ex.Message.Contains("already added", StringComparison.OrdinalIgnoreCase))
+        {
+        }
     }
 
     private static async Task WaitForRegtestMeshAsync(RPCClient bitcoin, string bitcoindEndpoint, string utreexodEndpoint)
@@ -241,6 +247,23 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
                 if (!message.Contains("already have block", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException($"utreexod rejected block {blockHash}: {message}");
             }
+        }
+    }
+
+    private static async Task SubmitBitcoinChainToUtreexodAsync(RPCClient bitcoin)
+    {
+        var bitcoinHeight = await bitcoin.GetBlockCountAsync();
+        var utreexodInfo = await UtreexodRpcAsync("getblockchaininfo", Array.Empty<object>());
+        var utreexodHeight = utreexodInfo.GetProperty("blocks").GetInt32();
+        var startHeight = Math.Max(1, utreexodHeight + 1);
+
+        for (var height = startHeight; height <= bitcoinHeight; height++)
+        {
+            var response = await bitcoin.SendCommandAsync("getblockhash", height);
+            if (string.IsNullOrWhiteSpace(response.ResultString))
+                throw new InvalidOperationException($"bitcoind getblockhash {height} returned an empty result.");
+
+            await SubmitBlocksToUtreexodAsync(bitcoin, new[] { response.ResultString });
         }
     }
 
@@ -424,11 +447,14 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await page.Locator("#Currency").FillAsync(currency);
         await page.Locator("#page-primary").ClickAsync();
 
-        await Expect(page).ToHaveURLAsync(new Regex($".*/stores/{Regex.Escape(storeId)}/invoices/[^/?#]+.*", RegexOptions.IgnoreCase),
-            new PageAssertionsToHaveURLOptions { Timeout = 30_000 });
         await AssertNoUiError(page);
-        var match = Regex.Match(page.Url, @"/invoices/([^/?#]+)");
-        Assert.True(match.Success, $"Could not extract invoice id from URL {page.Url}");
+        var status = page.Locator(".alert-success, .alert-danger").First;
+        await status.WaitForAsync(new LocatorWaitForOptions { Timeout = 30_000 });
+        var statusText = await status.InnerTextAsync();
+        Assert.DoesNotContain("alert-danger", await status.GetAttributeAsync("class") ?? string.Empty);
+
+        var match = Regex.Match(statusText, @"Invoice (\w+) just created!", RegexOptions.IgnoreCase);
+        Assert.True(match.Success, $"Could not extract invoice id from status message at {page.Url}: {statusText}");
         return match.Groups[1].Value;
     }
 
