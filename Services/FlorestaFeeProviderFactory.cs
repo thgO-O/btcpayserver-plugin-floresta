@@ -1,12 +1,11 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using BTCPayServer.Services;
 
 namespace BTCPayServer.Plugins.Floresta.Services;
 
 /// <summary>
-/// Replaces FeeProviderFactory. Returns FlorestaFeeProvider for all networks.
+/// Replaces FeeProviderFactory. Returns FlorestaFeeProvider for BTC only.
 /// </summary>
 public class FlorestaFeeProviderFactory : IFeeProviderFactory
 {
@@ -16,10 +15,9 @@ public class FlorestaFeeProviderFactory : IFeeProviderFactory
         BTCPayNetworkProvider networkProvider,
         FlorestaFeeProvider feeProvider)
     {
-        foreach (var network in networkProvider.GetAll().OfType<BTCPayNetwork>())
-        {
+        var network = networkProvider.GetNetwork<BTCPayNetwork>("BTC");
+        if (network is not null)
             _providers[network.CryptoCode.ToUpperInvariant()] = feeProvider;
-        }
     }
 
     public IFeeProvider CreateFeeProvider(BTCPayNetworkBase network)

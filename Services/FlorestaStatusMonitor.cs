@@ -1,5 +1,4 @@
 using System;
-using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,6 +22,7 @@ public class FlorestaStatusMonitor : IHostedService
     private readonly BTCPayNetworkProvider _networkProvider;
     private readonly EventAggregator _eventAggregator;
     private readonly ILogger<FlorestaStatusMonitor> _logger;
+    private readonly SemaphoreSlim _stepLock = new(1, 1);
     private CancellationTokenSource _cts;
     private Task _monitorLoop;
 
@@ -76,7 +76,7 @@ public class FlorestaStatusMonitor : IHostedService
         {
             try
             {
-                await StepAsync(ct);
+                await RefreshAsync(ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -89,6 +89,19 @@ public class FlorestaStatusMonitor : IHostedService
 
             var delay = State == NBXplorerState.Ready ? TimeSpan.FromMinutes(1) : TimeSpan.FromSeconds(10);
             try { await Task.Delay(delay, ct); } catch (OperationCanceledException) { break; }
+        }
+    }
+
+    public async Task RefreshAsync(CancellationToken ct)
+    {
+        await _stepLock.WaitAsync(ct);
+        try
+        {
+            await StepAsync(ct);
+        }
+        finally
+        {
+            _stepLock.Release();
         }
     }
 
@@ -215,14 +228,15 @@ public class FlorestaStatusMonitor : IHostedService
 
     private void PublishDashboard(StatusResult status, NBXplorerState oldState)
     {
-        foreach (var network in _networkProvider.GetAll().OfType<BTCPayNetwork>())
-        {
-            _dashboard.Publish(network, State, status, null, State == NBXplorerState.NotConnected ? "Floresta backend not connected" : null);
+        var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
+        if (network is null)
+            return;
 
-            if (oldState != State)
-            {
-                _eventAggregator.Publish(new NBXplorerStateChangedEvent(network, oldState, State));
-            }
+        _dashboard.Publish(network, State, status, null, State == NBXplorerState.NotConnected ? "Floresta backend not connected" : null);
+
+        if (oldState != State)
+        {
+            _eventAggregator.Publish(new NBXplorerStateChangedEvent(network, oldState, State));
         }
     }
 

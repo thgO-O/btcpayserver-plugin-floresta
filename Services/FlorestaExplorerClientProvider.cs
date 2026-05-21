@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Net.Http;
 using System.Reflection;
 using BTCPayServer.HostedServices;
@@ -30,7 +29,8 @@ public class FlorestaExplorerClientProvider : ExplorerClientProvider
             .GetField("_Clients", BindingFlags.NonPublic | BindingFlags.Instance);
         var clients = (Dictionary<string, ExplorerClient>)clientsField!.GetValue(this);
 
-        foreach (var network in networkProvider.GetAll().OfType<BTCPayNetwork>())
+        var network = networkProvider.GetNetwork<BTCPayNetwork>("BTC");
+        if (network is not null)
         {
             var httpClient = new HttpClient(handler, disposeHandler: false)
             {

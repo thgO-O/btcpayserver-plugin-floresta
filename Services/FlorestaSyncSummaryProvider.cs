@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.Linq;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.HostedServices;
 
@@ -20,24 +19,25 @@ public class FlorestaSyncSummaryProvider : ISyncSummaryProvider
 
     public bool AllAvailable()
     {
-        return _dashboard.IsFullySynched();
+        return _dashboard.IsFullySynched("BTC", out _);
     }
 
     public string Partial => "Floresta/FlorestaSyncSummary";
 
     public IEnumerable<ISyncStatus> GetStatuses()
     {
-        foreach (var network in _networkProvider.GetAll().OfType<BTCPayNetwork>())
+        var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
+        if (network is null)
+            yield break;
+
+        var summary = _dashboard.Get(network.CryptoCode);
+        var available = summary?.State == NBXplorerState.Ready;
+        yield return new FlorestaSyncStatus(available)
         {
-            var summary = _dashboard.Get(network.CryptoCode);
-            var available = summary?.State == NBXplorerState.Ready;
-            yield return new FlorestaSyncStatus(available)
-            {
-                PaymentMethodId = network.CryptoCode + "-CHAIN",
-                ChainHeight = summary?.Status?.ChainHeight ?? 0,
-                SyncHeight = summary?.Status?.SyncHeight ?? 0
-            };
-        }
+            PaymentMethodId = network.CryptoCode + "-CHAIN",
+            ChainHeight = summary?.Status?.ChainHeight ?? 0,
+            SyncHeight = summary?.Status?.SyncHeight ?? 0
+        };
     }
 }
 

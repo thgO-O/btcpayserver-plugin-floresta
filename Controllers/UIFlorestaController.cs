@@ -12,6 +12,7 @@ using BTCPayServer.Services;
 using BTCPayServer.Services.Stores;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BTCPayServer.Plugins.Floresta.Controllers;
@@ -25,6 +26,7 @@ public class UIFlorestaController : Controller
     private readonly StoreRepository _storeRepository;
     private readonly PaymentMethodHandlerDictionary _handlers;
     private readonly FlorestaStatusMonitor _statusMonitor;
+    private readonly ILogger<UIFlorestaController> _logger;
 
     public UIFlorestaController(
         SettingsRepository settingsRepository,
@@ -32,7 +34,8 @@ public class UIFlorestaController : Controller
         FlorestaDescriptorService descriptorService,
         StoreRepository storeRepository,
         PaymentMethodHandlerDictionary handlers,
-        FlorestaStatusMonitor statusMonitor)
+        FlorestaStatusMonitor statusMonitor,
+        ILogger<UIFlorestaController> logger)
     {
         _settingsRepository = settingsRepository;
         _electrumClient = electrumClient;
@@ -40,6 +43,7 @@ public class UIFlorestaController : Controller
         _storeRepository = storeRepository;
         _handlers = handlers;
         _statusMonitor = statusMonitor;
+        _logger = logger;
     }
 
     [HttpGet("~/server/floresta")]
@@ -92,6 +96,7 @@ public class UIFlorestaController : Controller
         }
 
         await _settingsRepository.UpdateSetting(settings);
+        await RefreshStatusAfterSettingsUpdate();
 
         if (command == "register")
         {
@@ -173,6 +178,19 @@ public class UIFlorestaController : Controller
     private void SetHealthViewBag()
     {
         ViewBag.Health = _statusMonitor.GetHealthSnapshot();
+    }
+
+    private async Task RefreshStatusAfterSettingsUpdate()
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await _statusMonitor.RefreshAsync(cts.Token);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not refresh Floresta status after settings update");
+        }
     }
 
     private sealed record DescriptorRegistrationResult(

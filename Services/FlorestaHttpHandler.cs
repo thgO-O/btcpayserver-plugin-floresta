@@ -43,6 +43,10 @@ public class FlorestaHttpHandler : HttpMessageHandler
     {
         var path = request.RequestUri?.AbsolutePath ?? "";
         var method = request.Method;
+        var cryptoCode = ExtractCryptoCode(path);
+
+        if (cryptoCode != null && !string.Equals(cryptoCode, "BTC", StringComparison.OrdinalIgnoreCase))
+            return NotFoundResponse();
 
         _logger.LogDebug("Intercepting {Method} {Path}", method, path);
 

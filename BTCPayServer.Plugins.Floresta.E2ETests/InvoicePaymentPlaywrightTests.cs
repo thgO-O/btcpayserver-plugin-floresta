@@ -47,8 +47,11 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await ConnectRegtestMeshAsync(bitcoin);
         await FundBitcoinMinerAsync(bitcoinWallet);
         await SubmitBitcoinChainToUtreexodAsync(bitcoin);
-        await WaitForUtreexodChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
-        await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
+        var chainHeight = await bitcoin.GetBlockCountAsync();
+        var bestBlockHash = await GetBitcoinBestBlockHashAsync(bitcoin);
+        await WaitForUtreexodChainAsync(chainHeight, bestBlockHash);
+        await WaitForFlorestaChainAsync(chainHeight, bestBlockHash);
+        await WaitForBtcpayFlorestaBackendAsync(page, chainHeight);
 
         var storeId = await CreateStore(page);
         await ConfigureStoreToSettleUnconfirmed(page, storeId);
@@ -310,6 +313,23 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
             var result = await FlorestaRpcAsync("listdescriptors", Array.Empty<object>());
             Assert.True(result.GetArrayLength() >= 2, "Expected receive/change descriptors to be registered in Floresta");
         }, TimeSpan.FromSeconds(60), "Floresta descriptor registration");
+    }
+
+    private async Task WaitForBtcpayFlorestaBackendAsync(IPage page, int expectedHeight)
+    {
+        await EventuallyAsync(async () =>
+        {
+            await page.GotoAsync(new Uri(_server.ServerUri, "/server/floresta").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
+            await AssertNoUiError(page);
+            await Expect(page.Locator("#FlorestaHealthElectrumStatus")).ToContainTextAsync("Ready", new LocatorAssertionsToContainTextOptions { Timeout = 2_000 });
+            await Expect(page.Locator("#FlorestaHealthRpcStatus")).ToContainTextAsync("Reachable", new LocatorAssertionsToContainTextOptions { Timeout = 2_000 });
+            await Expect(page.Locator("#FlorestaHealthIbd")).ToContainTextAsync("No", new LocatorAssertionsToContainTextOptions { Timeout = 2_000 });
+
+            var heightText = (await page.Locator("#FlorestaHealthHeight").InnerTextAsync()).Trim();
+            Assert.True(
+                int.TryParse(heightText, out var height) && height >= expectedHeight,
+                $"BTCPay Floresta status height {heightText} is below expected height {expectedHeight}");
+        }, TimeSpan.FromSeconds(90), "BTCPay Floresta backend status");
     }
 
     private static async Task<JsonElement> FlorestaRpcAsync(string method, object[] parameters)

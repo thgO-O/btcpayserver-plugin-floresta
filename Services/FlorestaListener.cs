@@ -107,6 +107,7 @@ public class FlorestaListener : IHostedService
             var header = await _electrumClient.HeadersSubscribeAsync(ct);
             _statusMonitor.UpdateTipHeight(header.Height);
             _tracker.SetTipHeight(header.Height);
+            await _statusMonitor.RefreshAsync(ct);
 
             await FindPaymentsViaPolling(ct);
 
@@ -145,6 +146,7 @@ public class FlorestaListener : IHostedService
             {
                 var ct = _cts?.Token ?? CancellationToken.None;
                 _statusMonitor.UpdateTipHeight(header.Height);
+                await _statusMonitor.RefreshAsync(ct);
 
                 var newTxs = await _tracker.HandleNewBlockAsync(header.Height, ct);
 
@@ -168,6 +170,7 @@ public class FlorestaListener : IHostedService
             var header = await _electrumClient.HeadersSubscribeAsync(ct);
             _statusMonitor.UpdateTipHeight(header.Height);
             _tracker.SetTipHeight(header.Height);
+            await _statusMonitor.RefreshAsync(ct);
             var newTxs = await _tracker.HandleNewBlockAsync(header.Height, ct);
             await ProcessNewTransactions(newTxs, ct);
             await FindPaymentsViaPolling(ct);
