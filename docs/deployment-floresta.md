@@ -2,6 +2,8 @@
 
 This deployment shape is intentionally different from the normal BTCPay Bitcoin Core/NBXplorer stack.
 
+Installing the public plugin package is safe by default on a normal BTCPay installation. The plugin only replaces BTCPay's Bitcoin backend when `FLORESTA_REPLACE_BTCPAY_BACKEND=true` is present before BTCPay Server starts.
+
 It includes:
 
 - `btcpayserver`
@@ -84,6 +86,7 @@ Do not publish RPC to the public internet. The Electrum endpoint is also expecte
 The plugin can be bootstrapped with `FLORESTA_*` environment variables. These values act as defaults before settings are saved in BTCPay:
 
 ```text
+FLORESTA_REPLACE_BTCPAY_BACKEND=false
 FLORESTA_ENABLED=true
 FLORESTA_CRYPTO_CODE=BTC
 FLORESTA_NETWORK=mainnet
@@ -100,6 +103,10 @@ FLORESTA_AUTO_REGISTER_DESCRIPTORS=true
 FLORESTA_AUTO_RESCAN_ON_NEW_DESCRIPTOR=false
 FLORESTA_USE_AS_BITCOIN_BACKEND=true
 ```
+
+`FLORESTA_REPLACE_BTCPAY_BACKEND=true` is a startup-only safety gate. It must be set before BTCPay Server starts for the plugin to remove BTCPay's NBXplorer services and register the Floresta backend shim. Without it, Server Settings > Floresta remains available for configuration and connection testing, but BTCPay keeps using its normal configured Bitcoin backend.
+
+The saved `UseFlorestaAsBitcoinBackend` setting is still required in Floresta backend mode, but it cannot activate backend replacement by itself after startup.
 
 For mainnet:
 
@@ -164,7 +171,7 @@ For a mainnet package-install PoC, use [docker-compose.release.example.yml](../d
 docker compose -f docker-compose.release.example.yml up -d
 ```
 
-This compose starts BTCPay Server, Postgres, and Floresta only. It does not mount a local plugin build. After BTCPay starts, create the first admin account, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta.
+This compose starts BTCPay Server, Postgres, and Floresta only. It does not mount a local plugin build. It sets `FLORESTA_REPLACE_BTCPAY_BACKEND=true` because this stack is explicitly a Floresta backend PoC. After BTCPay starts, create the first admin account, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta.
 
 By default the BTCPay HTTP port is bound to `127.0.0.1:23000`. Set `BTCPAY_HOST_BIND=0.0.0.0` only when publishing it behind a trusted reverse proxy, VPN, or tunnel.
 

@@ -39,6 +39,7 @@ services:
     working_dir: /workspace/btcpayserver-floresta-plugin
     environment:
       FLORESTA_NETWORK: regtest
+      FLORESTA_REPLACE_BTCPAY_BACKEND: "true"
       FLORESTA_RPC_URL: http://floresta:18442
       FLORESTA_ELECTRUM_HOST: floresta
       FLORESTA_ELECTRUM_PORT: "20001"
@@ -163,6 +164,7 @@ services:
       E2E_UTREEXOD_P2P_HOST: utreexod
       E2E_UTREEXOD_P2P_PORT: "38333"
       FLORESTA_NETWORK: regtest
+      FLORESTA_REPLACE_BTCPAY_BACKEND: "true"
       FLORESTA_RPC_URL: http://floresta:18442
       FLORESTA_ELECTRUM_HOST: floresta
       FLORESTA_ELECTRUM_PORT: "20001"

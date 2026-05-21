@@ -12,6 +12,7 @@ services:
       BTCPAY_NETWORK: mainnet
       BTCPAY_POSTGRES: "User ID=btcpay;Password=btcpay;Include Error Detail=true;Host=postgres;Port=5432;Database=btcpay"
       BTCPAY_BTC_BACKEND: floresta
+      FLORESTA_REPLACE_BTCPAY_BACKEND: "true"
       FLORESTA_ENABLED: "true"
       FLORESTA_CRYPTO_CODE: BTC
       FLORESTA_NETWORK: mainnet

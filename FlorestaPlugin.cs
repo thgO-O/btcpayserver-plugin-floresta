@@ -23,6 +23,17 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
 
     public override void Execute(IServiceCollection services)
     {
+        var replaceBackend = FlorestaBackendMode.IsBackendReplacementEnabled();
+
+        services.AddSingleton<FlorestaElectrumClient>();
+        services.AddSingleton<FlorestaRpcClient>();
+        services.AddSingleton<FlorestaDescriptorService>();
+        services.AddSingleton<FlorestaStatusMonitor>();
+        services.AddUIExtension("server-nav", "/Views/Shared/Floresta/NavExtension.cshtml");
+
+        if (!replaceBackend)
+            return;
+
         // ──────────────────────────────────────────────
         // 1. Remove NBXplorer services
         // ──────────────────────────────────────────────
@@ -57,9 +68,6 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         // 2. Register Floresta engine
         // ──────────────────────────────────────────────
 
-        services.AddSingleton<FlorestaElectrumClient>();
-        services.AddSingleton<FlorestaRpcClient>();
-        services.AddSingleton<FlorestaDescriptorService>();
         services.AddSingleton<FlorestaWalletTracker>();
 
         // DB context
@@ -95,7 +103,6 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<IFeeProviderFactory>(sp => sp.GetRequiredService<FlorestaFeeProviderFactory>());
 
         // Status monitoring (replaces NBXplorerWaiters)
-        services.AddSingleton<FlorestaStatusMonitor>();
         services.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(sp => sp.GetRequiredService<FlorestaStatusMonitor>());
 
         // Payment listener (replaces NBXplorerListener)
@@ -109,7 +116,6 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         // 5. Admin UI
         // ──────────────────────────────────────────────
 
-        services.AddUIExtension("server-nav", "/Views/Shared/Floresta/NavExtension.cshtml");
         services.AddUIExtension("onchain-wallet-setup-post-body", "/Views/Shared/Floresta/WatchOnlyWalletSetup.cshtml");
         services.AddScoped<FlorestaWatchOnlyWalletSetupFilter>();
         services.Configure<MvcOptions>(options =>

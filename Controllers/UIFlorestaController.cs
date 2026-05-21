@@ -50,14 +50,14 @@ public class UIFlorestaController : Controller
     public async Task<IActionResult> Settings()
     {
         var settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
-        SetHealthViewBag();
+        SetViewBags();
         return View(settings);
     }
 
     [HttpPost("~/server/floresta")]
     public async Task<IActionResult> Settings(FlorestaSettings settings, string command)
     {
-        SetHealthViewBag();
+        SetViewBags();
 
         if (command == "test")
         {
@@ -96,10 +96,18 @@ public class UIFlorestaController : Controller
         }
 
         await _settingsRepository.UpdateSetting(settings);
-        await RefreshStatusAfterSettingsUpdate();
+        if (FlorestaBackendMode.IsBackendReplacementEnabled())
+            await RefreshStatusAfterSettingsUpdate();
 
         if (command == "register")
         {
+            if (!FlorestaBackendMode.IsBackendReplacementEnabled())
+            {
+                ViewBag.StatusMessage =
+                    $"Backend replacement is inactive. Set {FlorestaBackendMode.ReplaceBackendEnvironmentVariable}=true and restart BTCPay Server before registering descriptors.";
+                return View(settings);
+            }
+
             try
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
@@ -120,6 +128,13 @@ public class UIFlorestaController : Controller
 
         if (command == "rescan")
         {
+            if (!FlorestaBackendMode.IsBackendReplacementEnabled())
+            {
+                ViewBag.StatusMessage =
+                    $"Backend replacement is inactive. Set {FlorestaBackendMode.ReplaceBackendEnvironmentVariable}=true and restart BTCPay Server before requesting a rescan.";
+                return View(settings);
+            }
+
             try
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -175,9 +190,11 @@ public class UIFlorestaController : Controller
         return new DescriptorRegistrationResult(storesScanned, storesWithWallet, alreadyRegistered, registered);
     }
 
-    private void SetHealthViewBag()
+    private void SetViewBags()
     {
         ViewBag.Health = _statusMonitor.GetHealthSnapshot();
+        ViewBag.BackendReplacementEnabled = FlorestaBackendMode.IsBackendReplacementEnabled();
+        ViewBag.ReplaceBackendEnvironmentVariable = FlorestaBackendMode.ReplaceBackendEnvironmentVariable;
     }
 
     private async Task RefreshStatusAfterSettingsUpdate()

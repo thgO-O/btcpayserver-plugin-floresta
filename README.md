@@ -17,11 +17,14 @@ BTCPay Server
 
 This is a watch-only integration. It never stores private keys, seeds, or mnemonics.
 
+Installing the plugin alone does not replace an existing BTCPay Bitcoin Core/NBXplorer backend. Backend replacement is opt-in at process startup with `FLORESTA_REPLACE_BTCPAY_BACKEND=true`.
+
 ## Current Alpha Status
 
 Implemented:
 
 - standalone plugin project outside the BTCPay Server repository;
+- safe-by-default Plugin Builder install path: the plugin does not replace BTCPay's Bitcoin backend unless `FLORESTA_REPLACE_BTCPAY_BACKEND=true` is set before startup;
 - Floresta server settings page;
 - settings defaults from `FLORESTA_*` environment variables;
 - watch-only wallet setup guard that hides or blocks generated, hot-wallet, and seed-import setup paths for BTC while Floresta is active;
@@ -48,7 +51,7 @@ MVP limits:
 - multisig/miniscript/private key import are explicit non-goals for the MVP;
 - BTCPay generated wallet, hot wallet, and seed-import setup paths are not supported by this plugin; configure an xpub or descriptor and use an external wallet or PSBT workflow for spending;
 - no public Electrum fallback;
-- disabling the plugin at runtime is still coarse-grained: do not load the plugin package when you want normal NBXplorer behavior.
+- a standard BTCPay Bitcoin Core/NBXplorer installation remains unchanged unless backend replacement is explicitly enabled before startup.
 
 ## Build
 
@@ -79,7 +82,7 @@ Run a mainnet PoC stack without Bitcoin Core, NBXplorer, or a local debug plugin
 docker compose -f docker-compose.release.example.yml up -d
 ```
 
-This starts BTCPay Server, Postgres, and Floresta only. Open BTCPay, create the first admin, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta. By default BTCPay binds to `127.0.0.1:23000`; change `BTCPAY_HOST_BIND` only when placing it behind a trusted reverse proxy or tunnel.
+This starts BTCPay Server, Postgres, and Floresta only, with `FLORESTA_REPLACE_BTCPAY_BACKEND=true` because the compose is explicitly a Floresta backend PoC. Open BTCPay, create the first admin, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta. By default BTCPay binds to `127.0.0.1:23000`; change `BTCPAY_HOST_BIND` only when placing it behind a trusted reverse proxy or tunnel.
 
 Run integration tests against a real `florestad` in Docker:
 
@@ -103,11 +106,18 @@ The integration compose expects a local Floresta checkout next to this repositor
 
 Razor views compile on build so external plugin loading and Playwright E2E can exercise the actual BTCPay UI.
 
+## Backend Replacement Gate
+
+`FLORESTA_REPLACE_BTCPAY_BACKEND=true` must be present before BTCPay Server starts for the plugin to remove BTCPay's NBXplorer services and register the Floresta backend shim. Without it, the settings page is available, but BTCPay keeps using its normal configured Bitcoin backend.
+
+This startup gate is intentionally separate from the saved `UseFlorestaAsBitcoinBackend` setting. The saved setting controls the plugin once the Floresta backend mode is already enabled; it cannot turn backend replacement on after startup.
+
 ## Environment Defaults
 
-The settings page can be prefilled from environment variables. Values stored in the BTCPay database still take precedence after settings are saved.
+The settings page can be prefilled from environment variables. Values stored in the BTCPay database still take precedence after settings are saved. `FLORESTA_REPLACE_BTCPAY_BACKEND` is not a saved setting; it is a startup-only safety gate.
 
 ```text
+FLORESTA_REPLACE_BTCPAY_BACKEND=false
 FLORESTA_ENABLED=true
 FLORESTA_CRYPTO_CODE=BTC
 FLORESTA_NETWORK=mainnet

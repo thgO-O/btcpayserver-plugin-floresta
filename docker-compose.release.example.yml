@@ -15,6 +15,7 @@ services:
       ASPNETCORE_URLS: http://0.0.0.0:8080
       BTCPAY_NETWORK: mainnet
       BTCPAY_POSTGRES: "User ID=${POSTGRES_USER:-btcpay};Password=${POSTGRES_PASSWORD:-btcpay};Include Error Detail=true;Host=postgres;Port=5432;Database=${POSTGRES_DB:-btcpay}"
+      FLORESTA_REPLACE_BTCPAY_BACKEND: "true"
       FLORESTA_ENABLED: "true"
       FLORESTA_CRYPTO_CODE: BTC
       FLORESTA_NETWORK: mainnet

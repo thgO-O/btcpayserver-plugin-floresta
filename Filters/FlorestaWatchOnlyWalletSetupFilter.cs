@@ -58,6 +58,8 @@ public sealed class FlorestaWatchOnlyWalletSetupFilter : IAsyncActionFilter
     {
         if (!string.Equals(cryptoCode, "BTC", StringComparison.OrdinalIgnoreCase))
             return false;
+        if (!FlorestaBackendMode.IsBackendReplacementEnabled())
+            return false;
 
         var settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
         return settings.Enabled &&

@@ -7,6 +7,8 @@
     ViewData.SetLayoutModel(new LayoutModel("floresta-settings", "Floresta")
         .SetCategory(WellKnownCategories.Server));
     var health = ViewBag.Health as FlorestaHealthSnapshot;
+    var backendReplacementEnabled = ViewBag.BackendReplacementEnabled is bool enabled && enabled;
+    var replaceBackendEnvironmentVariable = ViewBag.ReplaceBackendEnvironmentVariable as string ?? FlorestaBackendMode.ReplaceBackendEnvironmentVariable;
 }
 
 <div class="row">
@@ -16,6 +18,19 @@
                 This mode uses Floresta as a lightweight Bitcoin backend. It does not install or use Bitcoin Core, and it does not download the full blockchain.
                 Floresta still needs to store headers, compact filters, Utreexo state, and wallet cache data.
             </div>
+            @if (!backendReplacementEnabled)
+            {
+                <div class="alert alert-warning" id="FlorestaBackendInactiveNotice">
+                    The Floresta plugin is installed but backend replacement is inactive. BTCPay Server will keep using its configured Bitcoin Core/NBXplorer backend until
+                    <code>@replaceBackendEnvironmentVariable=true</code> is set before startup and BTCPay Server is restarted.
+                </div>
+            }
+            else
+            {
+                <div class="alert alert-success" id="FlorestaBackendActiveNotice">
+                    Floresta backend replacement is active for this BTCPay Server process.
+                </div>
+            }
             <div class="alert alert-warning">
                 The Floresta plugin is watch-only. It registers xpubs/descriptors and tracks payments, but it does not create seeds, store private keys, or sign transactions.
                 Use an external wallet or PSBT workflow for spending.
@@ -159,12 +174,13 @@
                     <input asp-for="UseFlorestaAsBitcoinBackend" type="checkbox" class="btcpay-toggle me-0" />
                     Use Floresta as Bitcoin backend
                 </label>
+                <span class="text-muted">Requires <code>@replaceBackendEnvironmentVariable=true</code> and a BTCPay Server restart.</span>
             </div>
 
             <button type="submit" class="btn btn-primary mt-4" id="SaveFlorestaSettings">Save</button>
             <button type="submit" name="command" value="test" class="btn btn-secondary mt-4">Test Connection</button>
-            <button type="submit" name="command" value="register" class="btn btn-secondary mt-4">Register Descriptors</button>
-            <button type="submit" name="command" value="rescan" class="btn btn-secondary mt-4">Rescan from Height</button>
+            <button type="submit" name="command" value="register" class="btn btn-secondary mt-4" disabled="@(!backendReplacementEnabled)">Register Descriptors</button>
+            <button type="submit" name="command" value="rescan" class="btn btn-secondary mt-4" disabled="@(!backendReplacementEnabled)">Rescan from Height</button>
         </form>
 
         @if (ViewBag.StatusMessage != null)

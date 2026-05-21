@@ -33,6 +33,7 @@ public sealed class FlorestaSettingsPlaywrightTests : IAsyncLifetime
 
         await Expect(page).ToHaveURLAsync(new Regex(".*/server/floresta$", RegexOptions.IgnoreCase));
         await Expect(page.GetByText("This mode uses Floresta as a lightweight Bitcoin backend")).ToBeVisibleAsync();
+        await Expect(page.Locator("#FlorestaBackendActiveNotice")).ToBeVisibleAsync();
         await Expect(page.Locator("#FlorestaNav")).ToBeVisibleAsync();
 
         var electrumHost = Environment.GetEnvironmentVariable("FLORESTA_ELECTRUM_HOST") ?? "127.0.0.1";

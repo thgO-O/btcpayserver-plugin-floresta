@@ -82,6 +82,7 @@ public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
         psi.Environment["ASPNETCORE_ENVIRONMENT"] = "Development";
         psi.Environment["BTCPAY_DEBUG_PLUGINS"] = pluginDll;
         psi.Environment["DEBUG_PLUGINS"] = pluginDll;
+        psi.Environment["FLORESTA_REPLACE_BTCPAY_BACKEND"] = Environment.GetEnvironmentVariable("FLORESTA_REPLACE_BTCPAY_BACKEND") ?? "true";
         psi.Environment["FLORESTA_NETWORK"] = Environment.GetEnvironmentVariable("FLORESTA_NETWORK") ?? "regtest";
         psi.Environment["FLORESTA_ELECTRUM_HOST"] = Environment.GetEnvironmentVariable("FLORESTA_ELECTRUM_HOST") ?? "127.0.0.1";
         psi.Environment["FLORESTA_ELECTRUM_PORT"] = Environment.GetEnvironmentVariable("FLORESTA_ELECTRUM_PORT") ?? "20001";

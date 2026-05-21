@@ -4,7 +4,8 @@
 @inject SettingsRepository SettingsRepository
 @{
     var settings = await SettingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
-    var isActive = settings.Enabled &&
+    var isActive = FlorestaBackendMode.IsBackendReplacementEnabled() &&
+                   settings.Enabled &&
                    settings.UseFlorestaAsBitcoinBackend &&
                    string.Equals(settings.CryptoCode, "BTC", StringComparison.OrdinalIgnoreCase) &&
                    string.Equals(Model?.CryptoCode, "BTC", StringComparison.OrdinalIgnoreCase);
