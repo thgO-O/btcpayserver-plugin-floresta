@@ -12,12 +12,11 @@ services:
       FLORESTA_RPC_URL: http://floresta:8332
       FLORESTA_GAP_LIMIT: "100"
       FLORESTA_FALLBACK_FEE_SAT_PER_VB: "1"
-      # Development loading path. Replace with the plugin package/install
-      # mechanism used by your BTCPay deployment.
-      BTCPAY_DEBUG_PLUGINS: BTCPayServer.Plugins.Floresta::/plugins/floresta/BTCPayServer.Plugins.Floresta.dll
     volumes:
       - btcpay_datadir:/datadir
-      - ./bin/Debug/net10.0:/plugins/floresta:ro
+      # Development loading path for a locally built plugin. For packaged
+      # deployments, install the .btcpay file through Manage Plugins instead.
+      - ./bin/Debug/net10.0:/root/.btcpayserver/Plugins/BTCPayServer.Plugins.Floresta:ro
 
   postgres:
     image: postgres:16-alpine

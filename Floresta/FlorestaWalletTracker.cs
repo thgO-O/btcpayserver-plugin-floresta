@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Plugins.Floresta.Data;
 using BTCPayServer.Plugins.Floresta.Services;
+using BTCPayServer.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
@@ -21,8 +22,8 @@ public class FlorestaWalletTracker
     private readonly FlorestaRpcClient _rpcClient;
     private readonly FlorestaDescriptorService _descriptorService;
     private readonly FlorestaDbContextFactory _dbFactory;
+    private readonly SettingsRepository _settingsRepository;
     private readonly BTCPayNetworkProvider _networkProvider;
-    private readonly FlorestaSettings _settings = new();
     private readonly ILogger<FlorestaWalletTracker> _logger;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly SemaphoreSlim _migrationLock = new(1, 1);
@@ -40,6 +41,7 @@ public class FlorestaWalletTracker
         FlorestaRpcClient rpcClient,
         FlorestaDescriptorService descriptorService,
         FlorestaDbContextFactory dbFactory,
+        SettingsRepository settingsRepository,
         BTCPayNetworkProvider networkProvider,
         ILogger<FlorestaWalletTracker> logger)
     {
@@ -48,6 +50,7 @@ public class FlorestaWalletTracker
         _rpcClient = rpcClient;
         _descriptorService = descriptorService;
         _dbFactory = dbFactory;
+        _settingsRepository = settingsRepository;
         _networkProvider = networkProvider;
         _logger = logger;
         ConfigureNetwork();
@@ -55,7 +58,8 @@ public class FlorestaWalletTracker
 
     private void ConfigureNetwork()
     {
-        var btcNetwork = _networkProvider.GetNetwork<BTCPayNetwork>(_settings.CryptoCode ?? "BTC");
+        var settings = new FlorestaSettings();
+        var btcNetwork = _networkProvider.GetNetwork<BTCPayNetwork>(settings.CryptoCode ?? "BTC");
         if (btcNetwork == null)
             return;
 
@@ -157,11 +161,13 @@ public class FlorestaWalletTracker
 
     public async Task TrackWalletAsync(string strategyStr, CancellationToken ct)
     {
-        if (_settings.AutoRegisterDescriptors)
-            await RegisterDescriptorsAsync(strategyStr, ct);
+        var settings = await GetSettingsAsync();
+
+        if (settings.AutoRegisterDescriptors)
+            await RegisterDescriptorsAsync(strategyStr, settings, ct);
 
         // Phase 1: derive addresses locally (fast, no network)
-        var addresses = await EnsureAddressesDerivedAsync(strategyStr, ct);
+        var addresses = await EnsureAddressesDerivedAsync(strategyStr, settings, ct);
         if (addresses == null)
             addresses = await GetTrackedAddressesAsync(strategyStr, ct);
 
@@ -192,9 +198,9 @@ public class FlorestaWalletTracker
             .ToListAsync(ct);
     }
 
-    private async Task RegisterDescriptorsAsync(string strategyStr, CancellationToken ct)
+    private async Task RegisterDescriptorsAsync(string strategyStr, FlorestaSettings settings, CancellationToken ct)
     {
-        var descriptors = _descriptorService.CreateDescriptors(_settings.CryptoCode ?? "BTC", strategyStr);
+        var descriptors = _descriptorService.CreateDescriptors(settings.CryptoCode ?? "BTC", strategyStr);
         var loaded = (await _rpcClient.ListDescriptorsAsync(ct) ?? Array.Empty<string>()).ToHashSet(StringComparer.Ordinal);
         var registeredAny = false;
 
@@ -208,10 +214,10 @@ public class FlorestaWalletTracker
             _logger.LogInformation("Registered Floresta descriptor {DescriptorHash}", descriptors.DescriptorHash);
         }
 
-        if (registeredAny && _settings.AutoRescanOnNewDescriptor)
+        if (registeredAny && settings.AutoRescanOnNewDescriptor)
         {
             await _rpcClient.RescanBlockchainAsync(
-                _settings.DefaultRescanStartHeight,
+                settings.DefaultRescanStartHeight,
                 null,
                 false,
                 "medium",
@@ -219,7 +225,7 @@ public class FlorestaWalletTracker
             _logger.LogInformation(
                 "Started Floresta rescan for descriptor {DescriptorHash} from height {Height}",
                 descriptors.DescriptorHash,
-                _settings.DefaultRescanStartHeight);
+                settings.DefaultRescanStartHeight);
         }
     }
 
@@ -228,7 +234,10 @@ public class FlorestaWalletTracker
     /// gap-limit addresses in the DB without any Electrum network calls.
     /// Returns the new addresses, or null if the wallet already existed.
     /// </summary>
-    private async Task<List<TrackedAddress>> EnsureAddressesDerivedAsync(string strategyStr, CancellationToken ct)
+    private async Task<List<TrackedAddress>> EnsureAddressesDerivedAsync(
+        string strategyStr,
+        FlorestaSettings settings,
+        CancellationToken ct)
     {
         var strategy = ParseStrategy(strategyStr);
         if (strategy == null)
@@ -250,16 +259,16 @@ public class FlorestaWalletTracker
             var wallet = new TrackedWallet
             {
                 Id = strategyStr,
-                CryptoCode = _settings.CryptoCode ?? "BTC",
+                CryptoCode = settings.CryptoCode ?? "BTC",
                 DerivationStrategy = strategyStr,
-                ReceiveGapIndex = _settings.GapLimit - 1,
-                ChangeGapIndex = _settings.GapLimit - 1
+                ReceiveGapIndex = settings.GapLimit - 1,
+                ChangeGapIndex = settings.GapLimit - 1
             };
 
             ctx.TrackedWallets.Add(wallet);
 
-            var addresses = DeriveAddresses(strategy, false, 0, _settings.GapLimit);
-            addresses.AddRange(DeriveAddresses(strategy, true, 0, _settings.GapLimit));
+            var addresses = DeriveAddresses(strategy, false, 0, settings.GapLimit);
+            addresses.AddRange(DeriveAddresses(strategy, true, 0, settings.GapLimit));
 
             foreach (var addr in addresses)
             {
@@ -431,7 +440,8 @@ public class FlorestaWalletTracker
         {
             // Derive addresses locally (fast, no Electrum calls).
             // Background TrackWalletAsync will subscribe them later.
-            await EnsureAddressesDerivedAsync(strategyStr, ct);
+            var settings = await GetSettingsAsync();
+            await EnsureAddressesDerivedAsync(strategyStr, settings, ct);
             addr = await ctx.TrackedAddresses
                 .Where(a => a.WalletId == strategyStr && a.IsChange == isChange && !a.IsUsed)
                 .OrderBy(a => a.KeyPath)
@@ -709,8 +719,8 @@ public class FlorestaWalletTracker
             IsFullySynched = _client.IsConnected,
             ChainHeight = _tipHeight,
             SyncHeight = _tipHeight,
-            Version = "floresta-plugin-1.0.0",
-            SupportedCryptoCodes = new[] { _settings.CryptoCode ?? "BTC" },
+            Version = $"floresta-plugin-{typeof(FlorestaPlugin).Assembly.GetName().Version?.ToString() ?? "unknown"}",
+            SupportedCryptoCodes = new[] { "BTC" },
             NetworkType = _network?.ChainName ?? ChainName.Mainnet,
             BitcoinStatus = new BitcoinStatus
             {
@@ -786,6 +796,7 @@ public class FlorestaWalletTracker
         var strategy = ParseStrategy(strategyStr);
         if (strategy == null)
             throw new InvalidOperationException($"Cannot parse derivation strategy: {strategyStr}");
+        var settings = await GetSettingsAsync();
 
         await _lock.WaitAsync(ct);
         List<TrackedAddress> newAddresses;
@@ -799,7 +810,7 @@ public class FlorestaWalletTracker
                 wallet = new TrackedWallet
                 {
                     Id = strategyStr,
-                    CryptoCode = _settings.CryptoCode ?? "BTC",
+                    CryptoCode = settings.CryptoCode ?? "BTC",
                     DerivationStrategy = strategyStr,
                     ReceiveGapIndex = startingIndex + gapLimit - 1,
                     ChangeGapIndex = startingIndex + gapLimit - 1
@@ -1135,7 +1146,8 @@ public class FlorestaWalletTracker
             return;
 
         var currentGapIndex = usedAddr.IsChange ? wallet.ChangeGapIndex : wallet.ReceiveGapIndex;
-        var gapLimit = _settings.GapLimit;
+        var settings = await GetSettingsAsync();
+        var gapLimit = settings.GapLimit;
 
         // If the used address is within gapLimit of the current boundary, extend
         if (index >= currentGapIndex - gapLimit + 1)
@@ -1234,4 +1246,8 @@ public class FlorestaWalletTracker
         return info.Outputs.Count > 0 ? info : null;
     }
 
+    private async Task<FlorestaSettings> GetSettingsAsync()
+    {
+        return await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+    }
 }
