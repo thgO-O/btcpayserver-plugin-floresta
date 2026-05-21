@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using BTCPayServer.Plugins.Floresta.Services;
 using NBitcoin;
+using NBXplorer.Models;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Floresta.Tests;
@@ -77,5 +78,25 @@ public class FlorestaFeePolicyTests
             3.5m);
 
         Assert.Equal(3.5m, result.SatoshiPerByte);
+    }
+
+    [Fact]
+    public void PsbtFeeRateUsesEstimatedFeeResultBeforeFallbacks()
+    {
+        var result = FlorestaHttpHandler.ResolvePsbtFeeRate(
+            new FeePreference { FallbackFeeRate = new FeeRate(4.0m) },
+            new GetFeeRateResult { FeeRate = new FeeRate(2.5m) });
+
+        Assert.Equal(2.5m, result.SatoshiPerByte);
+    }
+
+    [Fact]
+    public void PsbtFeeRateUsesExplicitPreferenceFirst()
+    {
+        var result = FlorestaHttpHandler.ResolvePsbtFeeRate(
+            new FeePreference { ExplicitFeeRate = new FeeRate(7.0m) },
+            new GetFeeRateResult { FeeRate = new FeeRate(2.5m) });
+
+        Assert.Equal(7.0m, result.SatoshiPerByte);
     }
 }

@@ -48,7 +48,7 @@ public class FlorestaHttpHandler : HttpMessageHandler
         if (cryptoCode != null && !string.Equals(cryptoCode, "BTC", StringComparison.OrdinalIgnoreCase))
             return NotFoundResponse();
 
-        _logger.LogDebug("Intercepting {Method} {Path}", method, path);
+        _logger.LogDebug("Intercepting {Method} {Path}", method, SanitizePathForLog(path));
 
         try
         {
@@ -67,7 +67,7 @@ public class FlorestaHttpHandler : HttpMessageHandler
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogError(ex, "Background tracking failed for {Strategy}", strategy);
+                            _logger.LogError(ex, "Background tracking failed for wallet {WalletId}", LogSafeId.Hash(strategy));
                         }
                     });
                     // Return empty 200 — ExplorerClient.TrackAsync uses SendAsync<string>,
@@ -273,12 +273,12 @@ public class FlorestaHttpHandler : HttpMessageHandler
                 return new HttpResponseMessage(HttpStatusCode.OK);
             }
 
-            _logger.LogWarning("Unhandled ExplorerClient request: {Method} {Path}", method, path);
+            _logger.LogWarning("Unhandled ExplorerClient request: {Method} {Path}", method, SanitizePathForLog(path));
             return new HttpResponseMessage(HttpStatusCode.NotImplemented);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error handling {Method} {Path}", method, path);
+            _logger.LogError(ex, "Error handling {Method} {Path}", method, SanitizePathForLog(path));
             return new HttpResponseMessage(HttpStatusCode.InternalServerError)
             {
                 Content = new StringContent(ex.Message)
@@ -324,18 +324,9 @@ public class FlorestaHttpHandler : HttpMessageHandler
         return null;
     }
 
-    private static KeyPath GetAccountKeyPath(ScriptPubKeyType scriptPubKeyType, Network network, int accountNumber)
+    private static string SanitizePathForLog(string path)
     {
-        var coinType = network.ChainName == ChainName.Mainnet ? 0 : 1;
-        var purpose = scriptPubKeyType switch
-        {
-            ScriptPubKeyType.Legacy => 44,
-            ScriptPubKeyType.SegwitP2SH => 49,
-            ScriptPubKeyType.Segwit => 84,
-            ScriptPubKeyType.TaprootBIP86 => 86,
-            _ => 84
-        };
-        return new KeyPath($"{purpose}'/{coinType}'/{accountNumber}'");
+        return Regex.Replace(path, @"/derivations/[^/]+", "/derivations/{wallet}");
     }
 
     private async Task<object> HandleCreatePSBTAsync(string strategyStr, string body, CancellationToken ct)
@@ -368,8 +359,7 @@ public class FlorestaHttpHandler : HttpMessageHandler
         {
             var blockTarget = request.FeePreference?.BlockTarget ?? 1;
             var feeResult = await _tracker.GetFeeRateAsync(blockTarget, ct);
-            var feeJson = JObject.FromObject(feeResult);
-            feeRate = feeJson["feeRate"]?.ToObject<FeeRate>() ?? new FeeRate(10m);
+            feeRate = ResolvePsbtFeeRate(request.FeePreference, feeResult);
         }
 
         // Build transaction using NBitcoin's TransactionBuilder
@@ -432,10 +422,6 @@ public class FlorestaHttpHandler : HttpMessageHandler
             var utxo = allUtxos.FirstOrDefault(u => u.Outpoint == input.PrevOut);
             if (utxo?.KeyPath != null)
             {
-                var feature = utxo.KeyPath.Indexes[0] == 1
-                    ? DerivationFeature.Change : DerivationFeature.Deposit;
-                var line = strategy.GetLineFor(feature);
-                var derivation = line.Derive(utxo.KeyPath.Indexes.Last());
                 var pubKeys = strategy.GetExtPubKeys().ToArray();
                 foreach (var pubKey in pubKeys)
                 {
@@ -474,6 +460,14 @@ public class FlorestaHttpHandler : HttpMessageHandler
         }
 
         return new JObject { ["psbt"] = psbt.ToBase64() };
+    }
+
+    internal static FeeRate ResolvePsbtFeeRate(FeePreference preference, GetFeeRateResult feeResult)
+    {
+        return preference?.ExplicitFeeRate ??
+               feeResult?.FeeRate ??
+               preference?.FallbackFeeRate ??
+               new FeeRate(FlorestaSettings.DefaultFallbackFeeRateSatsPerByte);
     }
 
     private HttpResponseMessage OkResponse(object data)

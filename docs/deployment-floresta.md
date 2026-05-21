@@ -171,7 +171,7 @@ For a mainnet package-install PoC, use [docker-compose.release.example.yml](../d
 docker compose -f docker-compose.release.example.yml up -d
 ```
 
-This compose starts BTCPay Server, Postgres, and Floresta only. It does not mount a local plugin build. It sets `FLORESTA_REPLACE_BTCPAY_BACKEND=true` because this stack is explicitly a Floresta backend PoC. After BTCPay starts, create the first admin account, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta.
+This compose starts BTCPay Server, Postgres, and Floresta only. It does not mount a local plugin build, and it builds the Floresta image from the upstream Git repository pinned to `v0.9.1` by default instead of requiring a local `../Floresta` checkout or floating on the default branch. Set `FLORESTA_REPO` to a local checkout, fork, or another Git URL/ref when you need to pin a different tree. It sets `FLORESTA_REPLACE_BTCPAY_BACKEND=true` because this stack is explicitly a Floresta backend PoC. After BTCPay starts, create the first admin account, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta.
 
 By default the BTCPay HTTP port is bound to `127.0.0.1:23000`. Set `BTCPAY_HOST_BIND=0.0.0.0` only when publishing it behind a trusted reverse proxy, VPN, or tunnel.
 

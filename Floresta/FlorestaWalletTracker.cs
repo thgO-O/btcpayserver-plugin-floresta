@@ -152,7 +152,7 @@ public class FlorestaWalletTracker
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to sync wallet state for {WalletId}", walletId);
+                _logger.LogWarning(ex, "Failed to sync wallet state for wallet {WalletId}", LogSafeId.Hash(walletId));
             }
         }
 
@@ -181,7 +181,7 @@ public class FlorestaWalletTracker
             }
 
             await SyncWalletStateAsync(strategyStr, addresses, ct);
-            _logger.LogInformation("Now tracking wallet {Strategy}", strategyStr);
+            _logger.LogInformation("Now tracking wallet {WalletId}", LogSafeId.Hash(strategyStr));
         }
         finally
         {
@@ -241,7 +241,7 @@ public class FlorestaWalletTracker
     {
         var strategy = ParseStrategy(strategyStr);
         if (strategy == null)
-            throw new InvalidOperationException($"Cannot parse derivation strategy: {strategyStr}");
+            throw new InvalidOperationException("Cannot parse derivation strategy.");
 
         await EnsureMigratedAsync(ct);
         await _lock.WaitAsync(ct);
@@ -782,7 +782,7 @@ public class FlorestaWalletTracker
             {
                 info.Status = ScanUTXOStatus.Error;
                 info.Error = ex.Message;
-                _logger.LogError(ex, "Scan failed for {Strategy}", strategyStr);
+                _logger.LogError(ex, "Scan failed for wallet {WalletId}", LogSafeId.Hash(strategyStr));
             }
         });
     }
@@ -795,7 +795,7 @@ public class FlorestaWalletTracker
 
         var strategy = ParseStrategy(strategyStr);
         if (strategy == null)
-            throw new InvalidOperationException($"Cannot parse derivation strategy: {strategyStr}");
+            throw new InvalidOperationException("Cannot parse derivation strategy.");
         var settings = await GetSettingsAsync();
 
         await _lock.WaitAsync(ct);
@@ -935,7 +935,7 @@ public class FlorestaWalletTracker
         }
         catch
         {
-            _logger.LogWarning("Failed to parse derivation strategy: {Strategy}", strategyStr);
+            _logger.LogWarning("Failed to parse derivation strategy for wallet {WalletId}", LogSafeId.Hash(strategyStr));
             return null;
         }
     }

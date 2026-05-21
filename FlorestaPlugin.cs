@@ -11,6 +11,7 @@ using BTCPayServer.Services;
 using BTCPayServer.Services.Fees;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace BTCPayServer.Plugins.Floresta;
 
@@ -43,8 +44,8 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         RemoveByServiceType<Common.IExplorerClientProvider>(services);
 
         // NBXplorerConnectionFactory (singleton + hosted service)
-        RemoveByImplementation<NBXplorerConnectionFactory>(services);
         RemoveHostedService<NBXplorerConnectionFactory>(services);
+        RemoveByImplementation<NBXplorerConnectionFactory>(services);
 
         // NBXplorerListener (hosted service)
         RemoveHostedService<NBXplorerListener>(services);
@@ -59,9 +60,9 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         RemoveByServiceType<ISyncSummaryProvider>(services);
 
         // FeeProviderFactory (singleton + interface + scheduled task)
+        RemoveScheduledTask<FeeProviderFactory>(services);
         RemoveByImplementation<FeeProviderFactory>(services);
         RemoveByServiceType<IFeeProviderFactory>(services);
-        RemoveScheduledTask<FeeProviderFactory>(services);
 
 
         // ──────────────────────────────────────────────
@@ -124,8 +125,11 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
 
     private static void RemoveByImplementation<T>(IServiceCollection services)
     {
-        var descriptors = services.Where(d => d.ImplementationType == typeof(T) ||
-                                              (d.ImplementationFactory?.Method.ReturnType == typeof(T)) ||
+        var descriptors = services.Where(d => (d.ImplementationType is not null &&
+                                               typeof(T).IsAssignableFrom(d.ImplementationType)) ||
+                                              d.ImplementationInstance is T ||
+                                              (d.ImplementationFactory?.Method.ReturnType is { } returnType &&
+                                               typeof(T).IsAssignableFrom(returnType)) ||
                                               d.ServiceType == typeof(T)).ToList();
         foreach (var d in descriptors)
             services.Remove(d);
@@ -140,52 +144,66 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
 
     private static void RemoveScheduledTask<T>(IServiceCollection services)
     {
-        var descriptors = services.Where(d =>
-            d.ServiceType == typeof(ScheduledTask) &&
-            d.ImplementationFactory != null).ToList();
+        var descriptors = services
+            .Where(d => IsScheduledTaskDescriptorFor<T>(services, d))
+            .ToList();
+
         foreach (var d in descriptors)
-        {
-            // ScheduledTask factories capture the type in their closure.
-            // Instantiate to check PeriodicTaskType.
-            try
-            {
-                var instance = (ScheduledTask)d.ImplementationFactory(null!);
-                if (instance.PeriodicTaskType == typeof(T))
-                    services.Remove(d);
-            }
-            catch
-            {
-                // Factory might need a real provider — skip
-            }
-        }
+            services.Remove(d);
+    }
+
+    private static bool IsScheduledTaskDescriptorFor<T>(IServiceCollection services, ServiceDescriptor descriptor)
+    {
+        if (descriptor.ServiceType != typeof(ScheduledTask) ||
+            descriptor.ImplementationFactory is null)
+            return false;
+
+        var scheduledTaskIndex = services.IndexOf(descriptor);
+        if (scheduledTaskIndex <= 0)
+            return false;
+
+        return IsServiceRegistrationFor<T>(services[scheduledTaskIndex - 1]);
     }
 
     private static void RemoveHostedService<T>(IServiceCollection services)
+        where T : class, IHostedService
     {
-        var descriptors = services.Where(d =>
-            d.ServiceType == typeof(Microsoft.Extensions.Hosting.IHostedService) &&
-            (d.ImplementationType == typeof(T) ||
-             d.ImplementationFactory != null)).ToList();
+        var descriptors = services
+            .Where(d => IsHostedServiceDescriptorFor<T>(services, d))
+            .ToList();
 
-        // Be selective - only remove if the implementation type matches
         foreach (var d in descriptors)
         {
-            if (d.ImplementationType == typeof(T))
-            {
-                services.Remove(d);
-            }
-            else if (d.ImplementationFactory != null)
-            {
-                // Check if the factory resolves to our type
-                // For factories like: sp => sp.GetRequiredService<T>()
-                // The return type or generic args might indicate the type
-                var factoryMethod = d.ImplementationFactory.Method;
-                if (factoryMethod.ReturnType == typeof(T) ||
-                    factoryMethod.ToString()?.Contains(typeof(T).Name) == true)
-                {
-                    services.Remove(d);
-                }
-            }
+            services.Remove(d);
         }
+    }
+
+    private static bool IsHostedServiceDescriptorFor<T>(IServiceCollection services, ServiceDescriptor descriptor)
+        where T : class, IHostedService
+    {
+        if (descriptor.ServiceType != typeof(IHostedService))
+            return false;
+
+        if (descriptor.ImplementationType is not null)
+            return typeof(T).IsAssignableFrom(descriptor.ImplementationType);
+
+        if (descriptor.ImplementationInstance is not null)
+            return descriptor.ImplementationInstance is T;
+
+        if (descriptor.ImplementationFactory is null)
+            return false;
+
+        var hostedServiceIndex = services.IndexOf(descriptor);
+        if (hostedServiceIndex <= 0)
+            return false;
+
+        return IsServiceRegistrationFor<T>(services[hostedServiceIndex - 1]);
+    }
+
+    private static bool IsServiceRegistrationFor<T>(ServiceDescriptor descriptor)
+    {
+        return descriptor.ServiceType == typeof(T) ||
+               (descriptor.ImplementationType is not null && typeof(T).IsAssignableFrom(descriptor.ImplementationType)) ||
+               descriptor.ImplementationInstance is T;
     }
 }

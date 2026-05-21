@@ -82,7 +82,7 @@ Run a mainnet PoC stack without Bitcoin Core, NBXplorer, or a local debug plugin
 docker compose -f docker-compose.release.example.yml up -d
 ```
 
-This starts BTCPay Server, Postgres, and Floresta only, with `FLORESTA_REPLACE_BTCPAY_BACKEND=true` because the compose is explicitly a Floresta backend PoC. Open BTCPay, create the first admin, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta. By default BTCPay binds to `127.0.0.1:23000`; change `BTCPAY_HOST_BIND` only when placing it behind a trusted reverse proxy or tunnel.
+This starts BTCPay Server, Postgres, and Floresta only, with `FLORESTA_REPLACE_BTCPAY_BACKEND=true` because the compose is explicitly a Floresta backend PoC. The release compose builds the Floresta image from the upstream Git repository pinned to `v0.9.1` by default, so it does not require a local `../Floresta` checkout or float on the default branch. Set `FLORESTA_REPO` to use a local checkout, fork, or another Git URL/ref. Open BTCPay, create the first admin, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta. By default BTCPay binds to `127.0.0.1:23000`; change `BTCPAY_HOST_BIND` only when placing it behind a trusted reverse proxy or tunnel.
 
 Run integration tests against a real `florestad` in Docker:
 

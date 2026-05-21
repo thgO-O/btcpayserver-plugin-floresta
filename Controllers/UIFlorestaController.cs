@@ -21,7 +21,6 @@ namespace BTCPayServer.Plugins.Floresta.Controllers;
 public class UIFlorestaController : Controller
 {
     private readonly SettingsRepository _settingsRepository;
-    private readonly FlorestaElectrumClient _electrumClient;
     private readonly FlorestaDescriptorService _descriptorService;
     private readonly StoreRepository _storeRepository;
     private readonly PaymentMethodHandlerDictionary _handlers;
@@ -30,7 +29,6 @@ public class UIFlorestaController : Controller
 
     public UIFlorestaController(
         SettingsRepository settingsRepository,
-        FlorestaElectrumClient electrumClient,
         FlorestaDescriptorService descriptorService,
         StoreRepository storeRepository,
         PaymentMethodHandlerDictionary handlers,
@@ -38,7 +36,6 @@ public class UIFlorestaController : Controller
         ILogger<UIFlorestaController> logger)
     {
         _settingsRepository = settingsRepository;
-        _electrumClient = electrumClient;
         _descriptorService = descriptorService;
         _storeRepository = storeRepository;
         _handlers = handlers;
@@ -64,12 +61,11 @@ public class UIFlorestaController : Controller
             try
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                var testClient = new FlorestaElectrumClient(
+                await using var testClient = new FlorestaElectrumClient(
                     settings,
                     NullLogger<FlorestaElectrumClient>.Instance);
                 await testClient.ConnectAsync(cts.Token);
                 var (sw, pv) = await testClient.ServerVersionAsync("BTCPayServer-Floresta", "1.4", cts.Token);
-                await testClient.DisposeAsync();
 
                 var rpcClient = new FlorestaRpcClient(settings, NullLogger<FlorestaRpcClient>.Instance);
                 var blockchainInfo = await rpcClient.GetBlockchainInfoAsync(cts.Token);

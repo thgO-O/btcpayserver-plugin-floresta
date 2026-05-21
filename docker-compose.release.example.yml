@@ -49,9 +49,9 @@ services:
       start_period: 10s
 
   floresta:
-    image: ${FLORESTA_IMAGE:-btcpay-floresta:local}
+    image: ${FLORESTA_IMAGE:-btcpay-floresta:mainnet-poc}
     build:
-      context: ${FLORESTA_REPO:-../Floresta}
+      context: "${FLORESTA_REPO:-https://github.com/getfloresta/Floresta.git#v0.9.1}"
       dockerfile: Dockerfile
     restart: unless-stopped
     command:
