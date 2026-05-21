@@ -1,0 +1,84 @@
+name: btcpay-floresta-release
+
+services:
+  btcpayserver:
+    image: ${BTCPAY_IMAGE:-btcpayserver/btcpayserver:2.3.9}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      floresta:
+        condition: service_healthy
+    ports:
+      - "${BTCPAY_HOST_BIND:-127.0.0.1}:${BTCPAY_HOST_PORT:-23000}:8080"
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      BTCPAY_NETWORK: mainnet
+      BTCPAY_POSTGRES: "User ID=${POSTGRES_USER:-btcpay};Password=${POSTGRES_PASSWORD:-btcpay};Include Error Detail=true;Host=postgres;Port=5432;Database=${POSTGRES_DB:-btcpay}"
+      FLORESTA_ENABLED: "true"
+      FLORESTA_CRYPTO_CODE: BTC
+      FLORESTA_NETWORK: mainnet
+      FLORESTA_ELECTRUM_HOST: floresta
+      FLORESTA_ELECTRUM_PORT: "50001"
+      FLORESTA_ELECTRUM_TLS: "false"
+      FLORESTA_RPC_URL: http://floresta:8332
+      FLORESTA_GAP_LIMIT: "${FLORESTA_GAP_LIMIT:-100}"
+      FLORESTA_FALLBACK_FEE_SAT_PER_VB: "${FLORESTA_FALLBACK_FEE_SAT_PER_VB:-1}"
+      FLORESTA_FILTERS_START_HEIGHT: "${FLORESTA_FILTERS_START_HEIGHT:-0}"
+      FLORESTA_AUTO_REGISTER_DESCRIPTORS: "true"
+      FLORESTA_AUTO_RESCAN_ON_NEW_DESCRIPTOR: "false"
+      FLORESTA_USE_AS_BITCOIN_BACKEND: "true"
+    volumes:
+      - btcpay_datadir:/datadir
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-btcpay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-btcpay}
+      POSTGRES_DB: ${POSTGRES_DB:-btcpay}
+    volumes:
+      - postgres_datadir:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-btcpay} -d ${POSTGRES_DB:-btcpay}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  floresta:
+    image: ${FLORESTA_IMAGE:-btcpay-floresta:local}
+    build:
+      context: ${FLORESTA_REPO:-../Floresta}
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command:
+      - florestad
+      - --network
+      - bitcoin
+      - --data-dir
+      - /data
+      - --rpc-address
+      - 0.0.0.0:8332
+      - --electrum-address
+      - 0.0.0.0:50001
+      - --filters-start-height
+      - "${FLORESTA_FILTERS_START_HEIGHT:-0}"
+      - --no-backfill
+    expose:
+      - "8332"
+      - "50001"
+    volumes:
+      - floresta_datadir:/data
+    healthcheck:
+      test: ["CMD", "floresta-cli", "--network", "bitcoin", "--rpc-host", "http://127.0.0.1:8332", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+volumes:
+  btcpay_datadir:
+  postgres_datadir:
+  floresta_datadir:

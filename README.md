@@ -73,6 +73,14 @@ Run focused tests:
 dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj --no-build --no-restore
 ```
 
+Run a mainnet PoC stack without Bitcoin Core, NBXplorer, or a local debug plugin mount:
+
+```bash
+docker compose -f docker-compose.release.example.yml up -d
+```
+
+This starts BTCPay Server, Postgres, and Floresta only. Open BTCPay, create the first admin, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta. By default BTCPay binds to `127.0.0.1:23000`; change `BTCPAY_HOST_BIND` only when placing it behind a trusted reverse proxy or tunnel.
+
 Run integration tests against a real `florestad` in Docker:
 
 ```bash

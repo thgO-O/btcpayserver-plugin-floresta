@@ -156,11 +156,23 @@ Old wallet or unknown history:
 
 Floresta still stores headers, compact filters unless disabled, Utreexo state, and wallet cache data.
 
-## Docker Compose Skeleton
+## Docker Compose Examples
 
-See [docker-compose.floresta.example.yml](../docker-compose.floresta.example.yml).
+For a mainnet package-install PoC, use [docker-compose.release.example.yml](../docker-compose.release.example.yml):
 
-The example is deliberately internal-only for Floresta RPC/Electrum. Expose ports only for local development and only to trusted networks.
+```bash
+docker compose -f docker-compose.release.example.yml up -d
+```
+
+This compose starts BTCPay Server, Postgres, and Floresta only. It does not mount a local plugin build. After BTCPay starts, create the first admin account, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta.
+
+By default the BTCPay HTTP port is bound to `127.0.0.1:23000`. Set `BTCPAY_HOST_BIND=0.0.0.0` only when publishing it behind a trusted reverse proxy, VPN, or tunnel.
+
+[docker-compose.local-mainnet.yml](../docker-compose.local-mainnet.yml) is for local development and mounts `./bin/Debug/net10.0` into BTCPay's plugin directory.
+
+[docker-compose.floresta.example.yml](../docker-compose.floresta.example.yml) is a minimal skeleton.
+
+All examples keep Floresta RPC/Electrum internal to the Docker network. Expose those ports only for local development and only to trusted networks.
 
 ## Integration Test Compose
 
