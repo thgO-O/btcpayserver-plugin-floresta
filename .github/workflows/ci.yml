@@ -1,0 +1,89 @@
+name: BTCPay Plugin tests
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      CI: true
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+      FLORESTA_REPO: https://github.com/getfloresta/Floresta.git#v0.9.1
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Initialize and update submodules
+        run: git submodule update --init --recursive
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: .nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/nuget.config', '**/global.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Set Docker test user
+        run: |
+          echo "DOTNET_TEST_UID=$(id -u)" >> "$GITHUB_ENV"
+          echo "DOTNET_TEST_GID=$(id -g)" >> "$GITHUB_ENV"
+
+      - name: Build plugin and tests
+        run: >
+          dotnet build BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj
+          -m:1
+          -p:UseSharedCompilation=false
+          -p:RunAnalyzers=false
+          -p:EnableNETAnalyzers=false
+          -nr:false
+
+      - name: Run unit tests
+        run: >
+          dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj
+          --no-build
+          --filter "Integration!=Integration&Playwright!=Playwright"
+          --logger "console;verbosity=normal"
+          -m:1
+          -p:UseSharedCompilation=false
+          -p:RunAnalyzers=false
+          -p:EnableNETAnalyzers=false
+          -nr:false
+
+      - name: Run integration tests
+        run: >
+          docker compose -f docker-compose.integration.yml
+          up --build --abort-on-container-exit --exit-code-from tests tests
+
+      - name: Cleanup integration stack
+        if: always()
+        run: docker compose -f docker-compose.integration.yml down --volumes --remove-orphans
+
+      - name: Run Playwright E2E tests
+        run: >
+          docker compose -f docker-compose.integration.yml --profile e2e
+          up --build --abort-on-container-exit --exit-code-from e2e-tests e2e-tests
+
+      - name: Cleanup Playwright E2E stack
+        if: always()
+        run: docker compose -f docker-compose.integration.yml --profile e2e down --volumes --remove-orphans
