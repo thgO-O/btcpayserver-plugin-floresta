@@ -147,6 +147,29 @@ ElectrumPort=20001
 RpcUrl=http://floresta:18442
 ```
 
+## Descriptor And Cache Model
+
+Floresta is responsible for descriptor registration, chain validation, rescan, and the Electrum/RPC surface. The plugin is responsible for BTCPay compatibility: it stores a local cache with tracked wallet metadata, derived addresses, transactions, UTXOs, balances, and metadata in the shape BTCPay normally expects from NBXplorer.
+
+On wallet tracking, the plugin creates receive/change descriptors from the BTCPay derivation strategy. With `AutoRegisterDescriptors=true`, tracking fails closed if Floresta rejects descriptor registration. With `AutoRegisterDescriptors=false`, the plugin still stores descriptor metadata locally, but it does not mark the descriptor as registered.
+
+The UTXO cache is rebuilt from Floresta Electrum data:
+
+- `blockchain.scripthash.get_history` supplies transaction history;
+- `blockchain.scripthash.listunspent` supplies the UTXO set used for wallet balance and PSBT inputs;
+- `blockchain.scripthash.get_balance` is a consistency check only. If it diverges from `listunspent`, the plugin retries once and then logs a warning while continuing with `listunspent`.
+
+## Operational Recovery
+
+Use this sequence when descriptors or the plugin cache need to be recovered:
+
+1. Register descriptors from Server Settings > Floresta, or let wallet tracking do it automatically when `AutoRegisterDescriptors=true`.
+2. Rescan Floresta from a height that covers the wallet history.
+3. Use the wallet UTXO cache wipe endpoint/action to clear local `utxos` and `transactions`.
+4. Start a wallet scan. The plugin keeps `tracked_wallets`, `tracked_addresses`, gap indexes, and `IsUsed` flags, derives only missing address ranges, and rebuilds the cache from `get_history` and `listunspent`.
+
+The cache wipe is intentionally not a wallet reset. It avoids address reuse by preserving local derivation and usage state.
+
 ## Wallet Age Guidance
 
 New or recent wallet:

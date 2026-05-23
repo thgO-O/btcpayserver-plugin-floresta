@@ -19,6 +19,19 @@ This is a watch-only integration. It never stores private keys, seeds, or mnemon
 
 Installing the plugin alone does not replace an existing BTCPay Bitcoin Core/NBXplorer backend. Backend replacement is opt-in at process startup with `FLORESTA_REPLACE_BTCPAY_BACKEND=true`.
 
+## Descriptor-First Cache Architecture
+
+Floresta is the validation and descriptor backend. When BTCPay tracks a wallet, the plugin converts the BTCPay derivation strategy into receive and change descriptors, records their hash locally, and, when `FLORESTA_AUTO_REGISTER_DESCRIPTORS=true`, registers them with Floresta through `listdescriptors` and `loaddescriptor` before deriving and syncing addresses.
+
+The plugin database is still required. It acts as the NBXplorer-compatible cache that BTCPay reads for addresses, transactions, UTXOs, balances, metadata, and PSBT inputs. The cache is derived from Floresta's local Electrum API with `blockchain.scripthash.get_history` and `blockchain.scripthash.listunspent`; `blockchain.scripthash.get_balance` is used only as a sanity check and does not replace `listunspent` as the operational UTXO source.
+
+Wallet recovery is intentionally two-stage:
+
+- Floresta stores and validates wallet descriptors and can rescan from the configured start height.
+- The plugin stores tracked wallet metadata, derived addresses, gap indexes, local transactions, and local UTXOs.
+- Wiping the wallet UTXO cache removes local `utxos` and `transactions` only. It preserves tracked wallets, tracked addresses, gap indexes, and `IsUsed` flags so addresses are not reused.
+- Scanning the wallet reuses existing tracked addresses, derives only missing ranges, and rebuilds the local UTXO/transaction cache from Floresta Electrum history and unspent outputs.
+
 ## Current Alpha Status
 
 Implemented:
@@ -34,8 +47,11 @@ Implemented:
 - local Floresta Electrum client with JSON-RPC line protocol, subscriptions, reconnect, and resubscribe;
 - local Floresta HTTP JSON-RPC client;
 - descriptor conversion for single-sig `wpkh`, `sh(wpkh)`, and `pkh`;
-- descriptor registration through `loaddescriptor`;
+- descriptor registration through `listdescriptors` and `loaddescriptor`;
 - optional `rescanblockchain`;
+- descriptor metadata persistence for tracked wallets;
+- wallet UTXO cache wipe and scan recovery;
+- Electrum balance sanity checks during address sync;
 - wallet tracking shim for addresses, scripthashes, transactions, UTXOs, confirmations, fees, and broadcast;
 - NBXplorer-compatible adapter/shim surface for the BTCPay on-chain pipeline;
 - Floresta status monitor and sync summary;
