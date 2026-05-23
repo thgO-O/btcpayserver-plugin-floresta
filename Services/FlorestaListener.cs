@@ -130,6 +130,7 @@ public class FlorestaListener : IHostedService
                 var newTxs = await _tracker.HandleScripthashNotificationAsync(scripthash, status, ct);
 
                 await ProcessNewTransactions(newTxs, ct);
+                await FindPaymentsViaPolling(ct);
             }
             catch (Exception ex)
             {
@@ -151,6 +152,7 @@ public class FlorestaListener : IHostedService
                 var newTxs = await _tracker.HandleNewBlockAsync(header.Height, ct);
 
                 await ProcessNewTransactions(newTxs, ct);
+                await FindPaymentsViaPolling(ct);
                 await PublishChainUpdate(ct);
             }
             catch (Exception ex)
@@ -326,7 +328,14 @@ public class FlorestaListener : IHostedService
                     paymentData.Set(invoice, handler, details);
 
                     var payment = await _paymentService.AddPayment(paymentData, [coin.OutPoint.Hash.ToString()]);
-                    if (payment != null) paymentCount++;
+                    if (payment != null)
+                    {
+                        paymentCount++;
+                        _eventAggregator.Publish(new InvoiceEvent(invoice, InvoiceEvent.ReceivedPayment)
+                        {
+                            Payment = payment
+                        });
+                    }
                 }
             }
             catch (Exception ex)
