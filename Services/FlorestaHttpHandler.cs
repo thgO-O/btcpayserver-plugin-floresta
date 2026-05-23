@@ -26,15 +26,18 @@ public class FlorestaHttpHandler : HttpMessageHandler
 {
     private readonly FlorestaWalletTracker _tracker;
     private readonly BTCPayNetworkProvider _networkProvider;
+    private readonly FlorestaStatusMonitor _statusMonitor;
     private readonly ILogger<FlorestaHttpHandler> _logger;
 
     public FlorestaHttpHandler(
         FlorestaWalletTracker tracker,
         BTCPayNetworkProvider networkProvider,
+        FlorestaStatusMonitor statusMonitor,
         ILogger<FlorestaHttpHandler> logger)
     {
         _tracker = tracker;
         _networkProvider = networkProvider;
+        _statusMonitor = statusMonitor;
         _logger = logger;
     }
 
@@ -183,7 +186,7 @@ public class FlorestaHttpHandler : HttpMessageHandler
             // GET /v1/cryptos/{code}/status — GetStatus
             if (method == HttpMethod.Get && path.EndsWith("/status"))
             {
-                var status = _tracker.GetStatus();
+                var status = _statusMonitor.GetStatusResult();
                 return OkResponse(status);
             }
 

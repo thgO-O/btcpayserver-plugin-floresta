@@ -161,6 +161,11 @@ public class FlorestaStatusMonitor : IHostedService
         }
     }
 
+    public StatusResult GetStatusResult()
+    {
+        return BuildStatusResult();
+    }
+
     private StatusResult BuildStatusResult()
     {
         var syncHeight = ValidatedHeight ?? TipHeight;
@@ -182,7 +187,10 @@ public class FlorestaStatusMonitor : IHostedService
                 IncrementalRelayFee = new NBitcoin.FeeRate(1.0m),
                 Capabilities = new NodeCapabilities
                 {
-                    CanScanTxoutSet = true
+                    CanScanTxoutSet = true,
+                    CanSupportSegwit = true,
+                    CanSupportTaproot = true,
+                    CanSupportTransactionCheck = true
                 }
             }
         };
