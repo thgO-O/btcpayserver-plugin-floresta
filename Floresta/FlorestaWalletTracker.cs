@@ -181,7 +181,9 @@ public class FlorestaWalletTracker
             throw new InvalidOperationException($"Floresta descriptor registration failed: {descriptorRegistration.Error}");
         }
 
-        var descriptorRegisteredAt = settings.AutoRegisterDescriptors ? DateTimeOffset.UtcNow : (DateTimeOffset?)null;
+        var descriptorRegisteredAt = settings.AutoRegisterDescriptors && descriptorRegistration.Registered > 0
+            ? DateTimeOffset.UtcNow
+            : (DateTimeOffset?)null;
         await StartDescriptorRescanIfNeededAsync(settings, descriptorRegistration, ct);
 
         // Phase 1: derive addresses locally (fast, no network)
@@ -401,7 +403,7 @@ public class FlorestaWalletTracker
         wallet.DescriptorHash = descriptorRegistration.Descriptors.DescriptorHash;
         wallet.ReceiveDescriptor = descriptorRegistration.Descriptors.ReceiveDescriptor;
         wallet.ChangeDescriptor = descriptorRegistration.Descriptors.ChangeDescriptor;
-        if (descriptorRegisteredAt is not null)
+        if (descriptorRegisteredAt is not null && wallet.DescriptorRegisteredAt is null)
             wallet.DescriptorRegisteredAt = descriptorRegisteredAt;
         wallet.DescriptorRegistrationError = descriptorRegistrationError;
     }
@@ -1049,7 +1051,9 @@ public class FlorestaWalletTracker
             throw new InvalidOperationException($"Floresta descriptor registration failed: {descriptorRegistration.Error}");
         }
 
-        var descriptorRegisteredAt = settings.AutoRegisterDescriptors ? DateTimeOffset.UtcNow : (DateTimeOffset?)null;
+        var descriptorRegisteredAt = settings.AutoRegisterDescriptors && descriptorRegistration.Registered > 0
+            ? DateTimeOffset.UtcNow
+            : (DateTimeOffset?)null;
         await StartDescriptorRescanIfNeededAsync(settings, descriptorRegistration, ct);
 
         await _lock.WaitAsync(ct);
