@@ -174,21 +174,7 @@ public class FlorestaWalletTracker
         }
 
         var descriptorRegisteredAt = settings.AutoRegisterDescriptors ? DateTimeOffset.UtcNow : (DateTimeOffset?)null;
-        if (settings.AutoRegisterDescriptors &&
-            descriptorRegistration.Registered > 0 &&
-            settings.AutoRescanOnNewDescriptor)
-        {
-            await _rpcClient.RescanBlockchainAsync(
-                settings.DefaultRescanStartHeight,
-                null,
-                false,
-                "medium",
-                ct);
-            _logger.LogInformation(
-                "Started Floresta rescan for descriptor {DescriptorHash} from height {Height}",
-                descriptorRegistration.Descriptors.DescriptorHash,
-                settings.DefaultRescanStartHeight);
-        }
+        await StartDescriptorRescanIfNeededAsync(settings, descriptorRegistration, ct);
 
         // Phase 1: derive addresses locally (fast, no network)
         var addresses = await EnsureAddressesDerivedAsync(
@@ -241,6 +227,28 @@ public class FlorestaWalletTracker
             0,
             0,
             null);
+    }
+
+    private async Task StartDescriptorRescanIfNeededAsync(
+        FlorestaSettings settings,
+        FlorestaDescriptorRegistrationResult descriptorRegistration,
+        CancellationToken ct)
+    {
+        if (!settings.AutoRegisterDescriptors ||
+            descriptorRegistration.Registered == 0 ||
+            !settings.AutoRescanOnNewDescriptor)
+            return;
+
+        await _rpcClient.RescanBlockchainAsync(
+            settings.DefaultRescanStartHeight,
+            null,
+            false,
+            "medium",
+            ct);
+        _logger.LogInformation(
+            "Started Floresta rescan for descriptor {DescriptorHash} from height {Height}",
+            descriptorRegistration.Descriptors.DescriptorHash,
+            settings.DefaultRescanStartHeight);
     }
 
     /// <summary>
@@ -865,7 +873,7 @@ public class FlorestaWalletTracker
             {
                 StartedAt = DateTimeOffset.UtcNow,
                 From = startingIndex,
-                Count = gapLimit,
+                Count = gapLimit * 2,
                 OverallProgress = 0
             }
         };
@@ -901,6 +909,16 @@ public class FlorestaWalletTracker
         if (strategy == null)
             throw new InvalidOperationException("Cannot parse derivation strategy.");
         var settings = await GetSettingsAsync();
+        var descriptorRegistration = await PrepareDescriptorRegistrationAsync(strategyStr, settings, ct);
+        if (!descriptorRegistration.Succeeded)
+        {
+            await UpsertWalletDescriptorMetadataAsync(strategyStr, settings, descriptorRegistration, null,
+                descriptorRegistration.Error, ct);
+            throw new InvalidOperationException($"Floresta descriptor registration failed: {descriptorRegistration.Error}");
+        }
+
+        var descriptorRegisteredAt = settings.AutoRegisterDescriptors ? DateTimeOffset.UtcNow : (DateTimeOffset?)null;
+        await StartDescriptorRescanIfNeededAsync(settings, descriptorRegistration, ct);
 
         await _lock.WaitAsync(ct);
         List<TrackedAddress> newAddresses;
@@ -919,12 +937,14 @@ public class FlorestaWalletTracker
                     ReceiveGapIndex = startingIndex + gapLimit - 1,
                     ChangeGapIndex = startingIndex + gapLimit - 1
                 };
+                ApplyDescriptorMetadata(wallet, descriptorRegistration, descriptorRegisteredAt, null);
                 ctx.TrackedWallets.Add(wallet);
             }
             else
             {
                 wallet.ReceiveGapIndex = Math.Max(wallet.ReceiveGapIndex, startingIndex + gapLimit - 1);
                 wallet.ChangeGapIndex = Math.Max(wallet.ChangeGapIndex, startingIndex + gapLimit - 1);
+                ApplyDescriptorMetadata(wallet, descriptorRegistration, descriptorRegisteredAt, null);
             }
 
             var existingHashes = await ctx.TrackedAddresses
@@ -954,9 +974,6 @@ public class FlorestaWalletTracker
             _lock.Release();
         }
 
-        var total = newAddresses.Count;
-        var done = 0;
-
         foreach (var addr in newAddresses)
         {
             try
@@ -968,26 +985,41 @@ public class FlorestaWalletTracker
             {
                 _logger.LogWarning(ex, "Failed to subscribe {Scripthash} during scan", addr.Scripthash);
             }
-
-            done++;
-            if (total > 0)
-                scanInfo.Progress.OverallProgress = done * 100 / total;
         }
+
+        var allAddresses = new List<TrackedAddress>();
+        await using (var ctx = _dbFactory.CreateContext())
+        {
+            allAddresses = await ctx.TrackedAddresses
+                .Where(a => a.WalletId == strategyStr)
+                .ToListAsync(ct);
+        }
+
+        scanInfo.Progress.Count = allAddresses.Count;
 
         if (_client.IsConnected)
         {
-            var allAddresses = new List<TrackedAddress>();
-            await using (var ctx = _dbFactory.CreateContext())
-            {
-                allAddresses = await ctx.TrackedAddresses
-                    .Where(a => a.WalletId == strategyStr)
-                    .ToListAsync(ct);
-            }
-            await SyncWalletStateAsync(strategyStr, allAddresses, ct);
+            await SyncWalletStateAsync(
+                strategyStr,
+                allAddresses,
+                ct,
+                (processed, total) =>
+                {
+                    scanInfo.Progress.Count = total;
+                    scanInfo.Progress.TotalSearched = processed;
+                    scanInfo.Progress.OverallProgress = total == 0 ? 100 : processed * 100 / total;
+                });
         }
 
-        scanInfo.Progress.TotalSearched = total;
-        scanInfo.Progress.Found = total;
+        await using (var ctx = _dbFactory.CreateContext())
+        {
+            scanInfo.Progress.Found = await ctx.Utxos
+                .CountAsync(u => u.WalletId == strategyStr && !u.IsSpent, ct);
+            if (scanInfo.Progress.TotalSearched == 0 && allAddresses.Count == 0)
+            {
+                scanInfo.Progress.OverallProgress = 100;
+            }
+        }
     }
 
     // ─────────────────────────────────────────────
@@ -1074,7 +1106,10 @@ public class FlorestaWalletTracker
     }
 
     private async Task SyncWalletStateAsync(
-        string walletId, List<TrackedAddress> addresses, CancellationToken ct)
+        string walletId,
+        List<TrackedAddress> addresses,
+        CancellationToken ct,
+        Action<int, int> reportProgress = null)
     {
         await using var ctx = _dbFactory.CreateContext();
         var existingTxids = await ctx.Transactions
@@ -1089,6 +1124,7 @@ public class FlorestaWalletTracker
             .Where(a => a.WalletId == walletId)
             .ToDictionaryAsync(a => a.Scripthash, ct);
 
+        var processed = 0;
         foreach (var addr in addresses)
         {
             try
@@ -1099,6 +1135,11 @@ public class FlorestaWalletTracker
             {
                 _logger.LogWarning(ex, "Error syncing address {Address} ({Scripthash})",
                     addr.Address, addr.Scripthash);
+            }
+            finally
+            {
+                processed++;
+                reportProgress?.Invoke(processed, addresses.Count);
             }
         }
 
