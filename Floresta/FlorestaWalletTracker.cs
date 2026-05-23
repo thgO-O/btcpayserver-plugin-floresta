@@ -1326,6 +1326,9 @@ public class FlorestaWalletTracker
 
         try
         {
+            // This is a diagnostic consistency check, not the operational UTXO source.
+            // If address sync or scans become too slow, gate this behind a setting/env
+            // or run it only during manual scan/recovery flows.
             var balance = await _client.ScripthashGetBalanceAsync(addr.Scripthash, ct);
             if (!BalanceMatchesListUnspent(balance, utxos))
             {
