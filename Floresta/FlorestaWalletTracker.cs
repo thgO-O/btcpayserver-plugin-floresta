@@ -254,7 +254,7 @@ public class FlorestaWalletTracker
     /// <summary>
     /// Fast, local-only address derivation. Creates the wallet and derives
     /// gap-limit addresses in the DB without any Electrum network calls.
-    /// Returns the new addresses, or null if the wallet already existed.
+    /// Returns all currently tracked wallet addresses after filling missing ranges.
     /// </summary>
     private async Task<List<TrackedAddress>> EnsureAddressesDerivedAsync(
         string strategyStr,
@@ -278,9 +278,32 @@ public class FlorestaWalletTracker
             if (existing != null)
             {
                 ApplyDescriptorMetadata(existing, descriptorRegistration, descriptorRegisteredAt, descriptorRegistrationError);
+
+                existing.ReceiveGapIndex = Math.Max(existing.ReceiveGapIndex, settings.GapLimit - 1);
+                existing.ChangeGapIndex = Math.Max(existing.ChangeGapIndex, settings.GapLimit - 1);
+
+                var existingHashes = await ctx.TrackedAddresses
+                    .Where(a => a.WalletId == strategyStr)
+                    .Select(a => a.Scripthash)
+                    .ToHashSetAsync(ct);
+
+                var addressesToAdd = DeriveAddresses(strategy, false, 0, existing.ReceiveGapIndex + 1)
+                    .Concat(DeriveAddresses(strategy, true, 0, existing.ChangeGapIndex + 1));
+                foreach (var addr in addressesToAdd)
+                {
+                    if (existingHashes.Contains(addr.Scripthash))
+                        continue;
+
+                    addr.WalletId = strategyStr;
+                    ctx.TrackedAddresses.Add(addr);
+                    existingHashes.Add(addr.Scripthash);
+                }
+
                 await ctx.SaveChangesAsync(ct);
                 _trackedStrategies[strategyStr] = strategy;
-                return null;
+                return await ctx.TrackedAddresses
+                    .Where(a => a.WalletId == strategyStr)
+                    .ToListAsync(ct);
             }
 
             var wallet = new TrackedWallet
@@ -1129,7 +1152,8 @@ public class FlorestaWalletTracker
         {
             try
             {
-                await SyncAddressAsync(ctx, addr, strategy, walletAddresses, existingTxids, ct);
+                if (walletAddresses.TryGetValue(addr.Scripthash, out var trackedAddress))
+                    await SyncAddressAsync(ctx, trackedAddress, strategy, walletAddresses, existingTxids, ct);
             }
             catch (Exception ex)
             {

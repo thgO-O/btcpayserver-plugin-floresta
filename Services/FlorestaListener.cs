@@ -289,6 +289,7 @@ public class FlorestaListener : IHostedService
                 if (promptDetails?.AccountDerivation == null) continue;
 
                 var strategy = promptDetails.AccountDerivation;
+                wallet.InvalidateCache(strategy);
                 var coins = await wallet.GetUnspentCoins(strategy, cancellation: ct);
 
                 var alreadyAccounted = invoice.GetPayments(false)
@@ -303,10 +304,11 @@ public class FlorestaListener : IHostedService
                     if (alreadyAccounted.Contains(coin.OutPoint))
                         continue;
 
+                    if (!InvoiceTracksScriptPubKey(invoice, pmi, network, coin.ScriptPubKey))
+                        continue;
+
                     var tx = await wallet.GetTransactionAsync(coin.OutPoint.Hash, cancellation: ct);
                     if (tx == null) continue;
-
-                    wallet.InvalidateCache(strategy);
 
                     var paymentData = new PaymentData
                     {
@@ -346,6 +348,15 @@ public class FlorestaListener : IHostedService
 
         if (paymentCount > 0)
             _logger.LogInformation("Found {Count} payments via polling", paymentCount);
+    }
+
+    internal static bool InvoiceTracksScriptPubKey(
+        InvoiceEntity invoice,
+        PaymentMethodId paymentMethodId,
+        BTCPayNetwork network,
+        Script scriptPubKey)
+    {
+        return invoice.Addresses?.Contains((paymentMethodId, network.GetTrackedDestination(scriptPubKey))) == true;
     }
 
     private async Task UpdatePaymentStates(BTCPayNetwork network, PaymentMethodId pmi, CancellationToken ct)
