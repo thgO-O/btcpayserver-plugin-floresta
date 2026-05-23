@@ -21,7 +21,7 @@ namespace BTCPayServer.Plugins.Floresta.Controllers;
 public class UIFlorestaController : Controller
 {
     private readonly SettingsRepository _settingsRepository;
-    private readonly FlorestaDescriptorService _descriptorService;
+    private readonly FlorestaDescriptorRegistry _descriptorRegistry;
     private readonly StoreRepository _storeRepository;
     private readonly PaymentMethodHandlerDictionary _handlers;
     private readonly FlorestaStatusMonitor _statusMonitor;
@@ -29,14 +29,14 @@ public class UIFlorestaController : Controller
 
     public UIFlorestaController(
         SettingsRepository settingsRepository,
-        FlorestaDescriptorService descriptorService,
+        FlorestaDescriptorRegistry descriptorRegistry,
         StoreRepository storeRepository,
         PaymentMethodHandlerDictionary handlers,
         FlorestaStatusMonitor statusMonitor,
         ILogger<UIFlorestaController> logger)
     {
         _settingsRepository = settingsRepository;
-        _descriptorService = descriptorService;
+        _descriptorRegistry = descriptorRegistry;
         _storeRepository = storeRepository;
         _handlers = handlers;
         _statusMonitor = statusMonitor;
@@ -169,18 +169,19 @@ public class UIFlorestaController : Controller
                 continue;
 
             storesWithWallet++;
-            var descriptors = _descriptorService.CreateDescriptors(settings.CryptoCode, scheme.ToString());
-            foreach (var descriptor in new[] { descriptors.ReceiveDescriptor, descriptors.ChangeDescriptor })
-            {
-                if (loaded.Contains(descriptor))
-                {
-                    alreadyRegistered++;
-                    continue;
-                }
-                await rpcClient.LoadDescriptorAsync(descriptor, ct);
-                loaded.Add(descriptor);
-                registered++;
-            }
+            var registration = await _descriptorRegistry.RegisterAsync(
+                settings.CryptoCode,
+                scheme.ToString(),
+                loaded,
+                rpcClient,
+                ct);
+            if (!registration.Succeeded)
+                throw new InvalidOperationException(registration.Error);
+
+            alreadyRegistered += registration.AlreadyRegistered;
+            registered += registration.Registered;
+            loaded.Add(registration.Descriptors.ReceiveDescriptor);
+            loaded.Add(registration.Descriptors.ChangeDescriptor);
         }
 
         return new DescriptorRegistrationResult(storesScanned, storesWithWallet, alreadyRegistered, registered);

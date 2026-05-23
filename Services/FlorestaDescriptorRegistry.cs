@@ -25,6 +25,16 @@ public class FlorestaDescriptorRegistry
         IReadOnlySet<string> loadedDescriptors,
         CancellationToken ct)
     {
+        return await RegisterAsync(cryptoCode, derivationStrategy, loadedDescriptors, _rpcClient, ct);
+    }
+
+    public async Task<FlorestaDescriptorRegistrationResult> RegisterAsync(
+        string cryptoCode,
+        string derivationStrategy,
+        IReadOnlySet<string> loadedDescriptors,
+        FlorestaRpcClient rpcClient,
+        CancellationToken ct)
+    {
         var descriptors = _descriptorService.CreateDescriptors(cryptoCode, derivationStrategy);
         var alreadyRegistered = 0;
         var registered = 0;
@@ -32,7 +42,7 @@ public class FlorestaDescriptorRegistry
         try
         {
             var loaded = loadedDescriptors is null
-                ? (await _rpcClient.ListDescriptorsAsync(ct) ?? Array.Empty<string>()).ToHashSet(StringComparer.Ordinal)
+                ? (await rpcClient.ListDescriptorsAsync(ct) ?? Array.Empty<string>()).ToHashSet(StringComparer.Ordinal)
                 : loadedDescriptors.ToHashSet(StringComparer.Ordinal);
 
             foreach (var descriptor in new[] { descriptors.ReceiveDescriptor, descriptors.ChangeDescriptor })
@@ -43,7 +53,7 @@ public class FlorestaDescriptorRegistry
                     continue;
                 }
 
-                var loadedDescriptor = await _rpcClient.LoadDescriptorAsync(descriptor, ct);
+                var loadedDescriptor = await rpcClient.LoadDescriptorAsync(descriptor, ct);
                 if (!loadedDescriptor)
                 {
                     return new FlorestaDescriptorRegistrationResult(
