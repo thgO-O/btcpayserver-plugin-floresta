@@ -29,6 +29,7 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<FlorestaElectrumClient>();
         services.AddSingleton<FlorestaRpcClient>();
         services.AddSingleton<FlorestaDescriptorService>();
+        services.AddSingleton<FlorestaDescriptorRegistry>();
         services.AddSingleton<FlorestaStatusMonitor>();
         services.AddUIExtension("server-nav", "/Views/Shared/Floresta/NavExtension.cshtml");
 

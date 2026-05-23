@@ -10,6 +10,11 @@ public class TrackedWallet
     public int ReceiveGapIndex { get; set; }
     public int ChangeGapIndex { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public string DescriptorHash { get; set; }
+    public string ReceiveDescriptor { get; set; }
+    public string ChangeDescriptor { get; set; }
+    public DateTimeOffset? DescriptorRegisteredAt { get; set; }
+    public string DescriptorRegistrationError { get; set; }
 }
 
 public class TrackedAddress

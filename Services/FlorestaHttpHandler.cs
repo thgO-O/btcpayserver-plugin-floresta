@@ -26,15 +26,18 @@ public class FlorestaHttpHandler : HttpMessageHandler
 {
     private readonly FlorestaWalletTracker _tracker;
     private readonly BTCPayNetworkProvider _networkProvider;
+    private readonly FlorestaStatusMonitor _statusMonitor;
     private readonly ILogger<FlorestaHttpHandler> _logger;
 
     public FlorestaHttpHandler(
         FlorestaWalletTracker tracker,
         BTCPayNetworkProvider networkProvider,
+        FlorestaStatusMonitor statusMonitor,
         ILogger<FlorestaHttpHandler> logger)
     {
         _tracker = tracker;
         _networkProvider = networkProvider;
+        _statusMonitor = statusMonitor;
         _logger = logger;
     }
 
@@ -58,12 +61,15 @@ public class FlorestaHttpHandler : HttpMessageHandler
                 var strategy = ExtractStrategy(path);
                 if (strategy != null)
                 {
-                    // Track in background — subscriptions are slow
+                    // Descriptor registration and local derivation are part of the import contract:
+                    // fail them before returning 200. Electrum subscription/sync is slow and can
+                    // continue in the background.
+                    var addresses = await _tracker.PrepareWalletTrackingAsync(strategy, cancellationToken);
                     _ = Task.Run(async () =>
                     {
                         try
                         {
-                            await _tracker.TrackWalletAsync(strategy, CancellationToken.None);
+                            await _tracker.SubscribeAndSyncWalletAsync(strategy, addresses, CancellationToken.None);
                         }
                         catch (Exception ex)
                         {
@@ -167,7 +173,9 @@ public class FlorestaHttpHandler : HttpMessageHandler
             // POST /v1/cryptos/{code}/transactions — Broadcast
             if (method == HttpMethod.Post && Regex.IsMatch(path, @"/v1/cryptos/\w+/transactions$"))
             {
-                var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                var body = request.Content is null
+                    ? Array.Empty<byte>()
+                    : await request.Content.ReadAsByteArrayAsync(cancellationToken);
                 var result = await _tracker.BroadcastAsync(body, cancellationToken);
                 return OkResponse(result);
             }
@@ -183,7 +191,7 @@ public class FlorestaHttpHandler : HttpMessageHandler
             // GET /v1/cryptos/{code}/status — GetStatus
             if (method == HttpMethod.Get && path.EndsWith("/status"))
             {
-                var status = _tracker.GetStatus();
+                var status = _statusMonitor.GetStatusResult();
                 return OkResponse(status);
             }
 
@@ -270,7 +278,13 @@ public class FlorestaHttpHandler : HttpMessageHandler
             // POST /v1/cryptos/{code}/derivations/{strategy}/utxos/wipe — WipeAsync
             if (method == HttpMethod.Post && path.EndsWith("/utxos/wipe"))
             {
-                return new HttpResponseMessage(HttpStatusCode.OK);
+                var strategy = ExtractStrategy(path);
+                if (strategy != null)
+                {
+                    await _tracker.WipeAsync(strategy, cancellationToken);
+                    return new HttpResponseMessage(HttpStatusCode.OK);
+                }
+                return NotFoundResponse();
             }
 
             _logger.LogWarning("Unhandled ExplorerClient request: {Method} {Path}", method, SanitizePathForLog(path));
