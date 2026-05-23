@@ -35,8 +35,11 @@ public class FlorestaListener : IHostedService
     private readonly PaymentMethodHandlerDictionary _handlers;
     private readonly BTCPayNetworkProvider _networkProvider;
     private readonly ILogger<FlorestaListener> _logger;
+    private readonly object _paymentPollingGate = new();
     private CancellationTokenSource _cts;
     private Task _listenTask;
+    private bool _paymentPollingRunning;
+    private bool _paymentPollingPending;
 
     public FlorestaListener(
         FlorestaElectrumClient electrumClient,
@@ -109,7 +112,7 @@ public class FlorestaListener : IHostedService
             _tracker.SetTipHeight(header.Height);
             await _statusMonitor.RefreshAsync(ct);
 
-            await FindPaymentsViaPolling(ct);
+            await RequestPaymentPollingAsync(ct);
 
             _logger.LogInformation("Electrum listener initialized, tip height: {Height}", header.Height);
         }
@@ -130,7 +133,7 @@ public class FlorestaListener : IHostedService
                 var newTxs = await _tracker.HandleScripthashNotificationAsync(scripthash, status, ct);
 
                 await ProcessNewTransactions(newTxs, ct);
-                await FindPaymentsViaPolling(ct);
+                await RequestPaymentPollingAsync(ct);
             }
             catch (Exception ex)
             {
@@ -152,7 +155,7 @@ public class FlorestaListener : IHostedService
                 var newTxs = await _tracker.HandleNewBlockAsync(header.Height, ct);
 
                 await ProcessNewTransactions(newTxs, ct);
-                await FindPaymentsViaPolling(ct);
+                await RequestPaymentPollingAsync(ct);
                 await PublishChainUpdate(ct);
             }
             catch (Exception ex)
@@ -175,7 +178,7 @@ public class FlorestaListener : IHostedService
             await _statusMonitor.RefreshAsync(ct);
             var newTxs = await _tracker.HandleNewBlockAsync(header.Height, ct);
             await ProcessNewTransactions(newTxs, ct);
-            await FindPaymentsViaPolling(ct);
+            await RequestPaymentPollingAsync(ct);
             await PublishChainUpdate(ct);
         }
         catch (Exception ex)
@@ -340,6 +343,10 @@ public class FlorestaListener : IHostedService
                     }
                 }
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error polling payments for invoice {InvoiceId}", invoice.Id);
@@ -348,6 +355,52 @@ public class FlorestaListener : IHostedService
 
         if (paymentCount > 0)
             _logger.LogInformation("Found {Count} payments via polling", paymentCount);
+    }
+
+    private async Task RequestPaymentPollingAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        lock (_paymentPollingGate)
+        {
+            if (_paymentPollingRunning)
+            {
+                _paymentPollingPending = true;
+                return;
+            }
+
+            _paymentPollingRunning = true;
+        }
+
+        try
+        {
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                await FindPaymentsViaPolling(ct);
+
+                lock (_paymentPollingGate)
+                {
+                    if (!_paymentPollingPending)
+                    {
+                        _paymentPollingRunning = false;
+                        return;
+                    }
+
+                    _paymentPollingPending = false;
+                }
+            }
+        }
+        catch
+        {
+            lock (_paymentPollingGate)
+            {
+                _paymentPollingRunning = false;
+                _paymentPollingPending = false;
+            }
+
+            throw;
+        }
     }
 
     internal static bool InvoiceTracksScriptPubKey(
