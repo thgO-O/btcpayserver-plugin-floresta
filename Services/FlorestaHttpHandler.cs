@@ -61,12 +61,15 @@ public class FlorestaHttpHandler : HttpMessageHandler
                 var strategy = ExtractStrategy(path);
                 if (strategy != null)
                 {
-                    // Track in background — subscriptions are slow
+                    // Descriptor registration and local derivation are part of the import contract:
+                    // fail them before returning 200. Electrum subscription/sync is slow and can
+                    // continue in the background.
+                    var addresses = await _tracker.PrepareWalletTrackingAsync(strategy, cancellationToken);
                     _ = Task.Run(async () =>
                     {
                         try
                         {
-                            await _tracker.TrackWalletAsync(strategy, CancellationToken.None);
+                            await _tracker.SubscribeAndSyncWalletAsync(strategy, addresses, CancellationToken.None);
                         }
                         catch (Exception ex)
                         {

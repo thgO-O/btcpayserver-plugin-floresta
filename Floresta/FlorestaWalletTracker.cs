@@ -166,6 +166,12 @@ public class FlorestaWalletTracker
 
     public async Task TrackWalletAsync(string strategyStr, CancellationToken ct)
     {
+        var addresses = await PrepareWalletTrackingAsync(strategyStr, ct);
+        await SubscribeAndSyncWalletAsync(strategyStr, addresses, ct);
+    }
+
+    public async Task<List<TrackedAddress>> PrepareWalletTrackingAsync(string strategyStr, CancellationToken ct)
+    {
         var settings = await GetSettingsAsync();
         var descriptorRegistration = await PrepareDescriptorRegistrationAsync(strategyStr, settings, ct);
         if (!descriptorRegistration.Succeeded)
@@ -188,6 +194,16 @@ public class FlorestaWalletTracker
             ct);
         if (addresses == null)
             addresses = await GetTrackedAddressesAsync(strategyStr, ct);
+
+        return addresses;
+    }
+
+    public async Task SubscribeAndSyncWalletAsync(
+        string strategyStr,
+        List<TrackedAddress> addresses,
+        CancellationToken ct)
+    {
+        addresses ??= await GetTrackedAddressesAsync(strategyStr, ct);
 
         // Phase 2: subscribe on Electrum + sync state (slow, needs network)
         await _lock.WaitAsync(ct);
