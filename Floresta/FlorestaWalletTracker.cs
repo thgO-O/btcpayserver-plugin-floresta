@@ -400,9 +400,12 @@ public class FlorestaWalletTracker
         DateTimeOffset? descriptorRegisteredAt,
         string descriptorRegistrationError)
     {
-        wallet.DescriptorHash = descriptorRegistration.Descriptors.DescriptorHash;
-        wallet.ReceiveDescriptor = descriptorRegistration.Descriptors.ReceiveDescriptor;
-        wallet.ChangeDescriptor = descriptorRegistration.Descriptors.ChangeDescriptor;
+        if (descriptorRegistration.Descriptors is not null)
+        {
+            wallet.DescriptorHash = descriptorRegistration.Descriptors.DescriptorHash;
+            wallet.ReceiveDescriptor = descriptorRegistration.Descriptors.ReceiveDescriptor;
+            wallet.ChangeDescriptor = descriptorRegistration.Descriptors.ChangeDescriptor;
+        }
         if (descriptorRegisteredAt is not null && wallet.DescriptorRegisteredAt is null)
             wallet.DescriptorRegisteredAt = descriptorRegisteredAt;
         wallet.DescriptorRegistrationError = descriptorRegistrationError;

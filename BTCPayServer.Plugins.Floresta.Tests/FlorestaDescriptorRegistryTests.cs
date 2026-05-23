@@ -97,6 +97,21 @@ public class FlorestaDescriptorRegistryTests
         Assert.Contains("backend unavailable", result.Error);
     }
 
+    [Fact]
+    public async Task RegisterAsyncReturnsErrorWhenDescriptorCannotBeCreated()
+    {
+        var handler = new RecordingRpcHandler(_ => throw new InvalidOperationException("RPC should not be called"));
+        var registry = CreateRegistry(CreateNetworkProvider(), handler);
+
+        var result = await registry.RegisterAsync("BTC", "not-a-derivation-strategy", CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Null(result.Descriptors);
+        Assert.Equal(0, result.AlreadyRegistered);
+        Assert.Equal(0, result.Registered);
+        Assert.Empty(handler.Requests);
+    }
+
     private static FlorestaDescriptorRegistry CreateRegistry(
         BTCPayNetworkProvider networkProvider,
         HttpMessageHandler handler)

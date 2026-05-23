@@ -35,12 +35,15 @@ public class FlorestaDescriptorRegistry
         FlorestaRpcClient rpcClient,
         CancellationToken ct)
     {
-        var descriptors = _descriptorService.CreateDescriptors(cryptoCode, derivationStrategy);
         var alreadyRegistered = 0;
         var registered = 0;
+        FlorestaDescriptorSet descriptors = null;
 
         try
         {
+            ct.ThrowIfCancellationRequested();
+            descriptors = _descriptorService.CreateDescriptors(cryptoCode, derivationStrategy);
+
             var loaded = loadedDescriptors is null
                 ? (await rpcClient.ListDescriptorsAsync(ct) ?? Array.Empty<string>()).ToHashSet(StringComparer.Ordinal)
                 : loadedDescriptors.ToHashSet(StringComparer.Ordinal);
@@ -68,6 +71,10 @@ public class FlorestaDescriptorRegistry
             }
 
             return new FlorestaDescriptorRegistrationResult(descriptors, alreadyRegistered, registered, null);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
