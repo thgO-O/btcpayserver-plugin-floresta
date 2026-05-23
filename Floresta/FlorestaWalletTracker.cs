@@ -1189,7 +1189,7 @@ public class FlorestaWalletTracker
                 newTxs.Add(txInfo);
         }
 
-        var utxos = await _client.ScripthashListUnspentAsync(addr.Scripthash, ct);
+        var utxos = await GetReconciledUtxosAsync(addr, ct);
         await UpdateUtxosForAddress(ctx, addr, utxos, ct);
 
         if (history.Length > 0 && !addr.IsUsed)
@@ -1199,6 +1199,55 @@ public class FlorestaWalletTracker
         }
 
         return newTxs;
+    }
+
+    private async Task<FlorestaElectrumUnspentItem[]> GetReconciledUtxosAsync(
+        TrackedAddress addr,
+        CancellationToken ct)
+    {
+        var utxos = await _client.ScripthashListUnspentAsync(addr.Scripthash, ct);
+
+        try
+        {
+            var balance = await _client.ScripthashGetBalanceAsync(addr.Scripthash, ct);
+            if (!BalanceMatchesListUnspent(balance, utxos))
+            {
+                _logger.LogWarning(
+                    "Electrum balance mismatch for wallet {WalletId} scripthash {Scripthash}; retrying once",
+                    LogSafeId.Hash(addr.WalletId),
+                    addr.Scripthash);
+
+                utxos = await _client.ScripthashListUnspentAsync(addr.Scripthash, ct);
+                balance = await _client.ScripthashGetBalanceAsync(addr.Scripthash, ct);
+
+                if (!BalanceMatchesListUnspent(balance, utxos))
+                {
+                    _logger.LogWarning(
+                        "Electrum balance still mismatched for wallet {WalletId} scripthash {Scripthash}; keeping listunspent as UTXO source",
+                        LogSafeId.Hash(addr.WalletId),
+                        addr.Scripthash);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Could not reconcile Electrum balance for wallet {WalletId} scripthash {Scripthash}; keeping listunspent as UTXO source",
+                LogSafeId.Hash(addr.WalletId),
+                addr.Scripthash);
+        }
+
+        return utxos;
+    }
+
+    private static bool BalanceMatchesListUnspent(
+        FlorestaElectrumBalance balance,
+        IReadOnlyCollection<FlorestaElectrumUnspentItem> utxos)
+    {
+        var confirmed = utxos.Where(u => u.Height > 0).Sum(u => u.Value);
+        var unconfirmed = utxos.Where(u => u.Height <= 0).Sum(u => u.Value);
+        return balance.Confirmed == confirmed && balance.Unconfirmed == unconfirmed;
     }
 
     private async Task UpdateUtxosForAddress(
