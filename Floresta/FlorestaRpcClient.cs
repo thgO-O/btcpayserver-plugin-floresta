@@ -36,7 +36,14 @@ public class FlorestaRpcClient
     }
 
     public FlorestaRpcClient(FlorestaSettings settings, ILogger<FlorestaRpcClient> logger)
-        : this(null, logger, new HttpClient { Timeout = TimeSpan.FromSeconds(30) })
+        : this((SettingsRepository)null, logger, new HttpClient { Timeout = TimeSpan.FromSeconds(30) })
+    {
+        _settings = settings;
+        _explicitSettings = true;
+    }
+
+    public FlorestaRpcClient(FlorestaSettings settings, ILogger<FlorestaRpcClient> logger, HttpClient httpClient)
+        : this((SettingsRepository)null, logger, httpClient)
     {
         _settings = settings;
         _explicitSettings = true;
