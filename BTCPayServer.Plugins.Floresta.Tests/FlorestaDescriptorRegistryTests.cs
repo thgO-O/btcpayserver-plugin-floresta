@@ -78,6 +78,25 @@ public class FlorestaDescriptorRegistryTests
         Assert.Contains("descriptor rejected", result.Error);
     }
 
+    [Fact]
+    public async Task RegisterAsyncReturnsErrorWhenListFails()
+    {
+        var context = CreateContext();
+        var handler = new RecordingRpcHandler(request => request.Method switch
+        {
+            "listdescriptors" => new { error = new { code = -1, message = "backend unavailable" } },
+            _ => throw new InvalidOperationException($"Unexpected RPC method {request.Method}")
+        });
+        var registry = CreateRegistry(context.NetworkProvider, handler);
+
+        var result = await registry.RegisterAsync("BTC", context.DerivationStrategy, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(0, result.AlreadyRegistered);
+        Assert.Equal(0, result.Registered);
+        Assert.Contains("backend unavailable", result.Error);
+    }
+
     private static FlorestaDescriptorRegistry CreateRegistry(
         BTCPayNetworkProvider networkProvider,
         HttpMessageHandler handler)
