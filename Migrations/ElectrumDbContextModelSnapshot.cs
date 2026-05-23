@@ -159,6 +159,9 @@ namespace BTCPayServer.Plugins.Floresta.Migrations
                 b.Property<int>("ChangeGapIndex")
                     .HasColumnType("integer");
 
+                b.Property<string>("ChangeDescriptor")
+                    .HasColumnType("text");
+
                 b.Property<DateTimeOffset>("CreatedAt")
                     .HasColumnType("timestamp with time zone");
 
@@ -166,6 +169,19 @@ namespace BTCPayServer.Plugins.Floresta.Migrations
                     .HasColumnType("text");
 
                 b.Property<string>("DerivationStrategy")
+                    .HasColumnType("text");
+
+                b.Property<string>("DescriptorHash")
+                    .HasMaxLength(64)
+                    .HasColumnType("character varying(64)");
+
+                b.Property<DateTimeOffset?>("DescriptorRegisteredAt")
+                    .HasColumnType("timestamp with time zone");
+
+                b.Property<string>("DescriptorRegistrationError")
+                    .HasColumnType("text");
+
+                b.Property<string>("ReceiveDescriptor")
                     .HasColumnType("text");
 
                 b.Property<int>("ReceiveGapIndex")
