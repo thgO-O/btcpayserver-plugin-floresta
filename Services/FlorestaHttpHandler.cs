@@ -173,7 +173,9 @@ public class FlorestaHttpHandler : HttpMessageHandler
             // POST /v1/cryptos/{code}/transactions — Broadcast
             if (method == HttpMethod.Post && Regex.IsMatch(path, @"/v1/cryptos/\w+/transactions$"))
             {
-                var body = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
+                var body = request.Content is null
+                    ? Array.Empty<byte>()
+                    : await request.Content.ReadAsByteArrayAsync(cancellationToken);
                 var result = await _tracker.BroadcastAsync(body, cancellationToken);
                 return OkResponse(result);
             }
