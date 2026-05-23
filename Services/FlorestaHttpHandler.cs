@@ -270,7 +270,13 @@ public class FlorestaHttpHandler : HttpMessageHandler
             // POST /v1/cryptos/{code}/derivations/{strategy}/utxos/wipe — WipeAsync
             if (method == HttpMethod.Post && path.EndsWith("/utxos/wipe"))
             {
-                return new HttpResponseMessage(HttpStatusCode.OK);
+                var strategy = ExtractStrategy(path);
+                if (strategy != null)
+                {
+                    await _tracker.WipeAsync(strategy, cancellationToken);
+                    return new HttpResponseMessage(HttpStatusCode.OK);
+                }
+                return NotFoundResponse();
             }
 
             _logger.LogWarning("Unhandled ExplorerClient request: {Method} {Path}", method, SanitizePathForLog(path));

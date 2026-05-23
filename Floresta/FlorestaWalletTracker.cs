@@ -607,6 +607,35 @@ public class FlorestaWalletTracker
         };
     }
 
+    public async Task WipeAsync(string strategyStr, CancellationToken ct)
+    {
+        await EnsureMigratedAsync(ct);
+        await _lock.WaitAsync(ct);
+        try
+        {
+            await using var ctx = _dbFactory.CreateContext();
+            var utxos = await ctx.Utxos
+                .Where(u => u.WalletId == strategyStr)
+                .ToListAsync(ct);
+            var transactions = await ctx.Transactions
+                .Where(t => t.WalletId == strategyStr)
+                .ToListAsync(ct);
+
+            ctx.Utxos.RemoveRange(utxos);
+            ctx.Transactions.RemoveRange(transactions);
+            await ctx.SaveChangesAsync(ct);
+            _logger.LogInformation(
+                "Wiped Floresta wallet cache for wallet {WalletId}: {UtxoCount} UTXOs, {TxCount} transactions",
+                LogSafeId.Hash(strategyStr),
+                utxos.Count,
+                transactions.Count);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async Task<TransactionResult> GetTransactionResultAsync(string txId, CancellationToken ct)
     {
         await EnsureMigratedAsync(ct);
