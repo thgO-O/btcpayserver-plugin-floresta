@@ -207,22 +207,29 @@ Both examples keep Floresta RPC/Electrum internal to the Docker network. Expose 
 For tests against a real `florestad`, use:
 
 ```bash
-docker compose -f docker-compose.integration.yml up --build --abort-on-container-exit --exit-code-from tests
+docker compose -f docker-compose.integration.yml up -d floresta
+
+dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj \
+  --filter "Integration=Integration"
+
 docker compose -f docker-compose.integration.yml down -v
 ```
 
 This starts only:
 
-- `floresta` on regtest;
-- `tests`, a .NET SDK runner that executes the `Integration=Integration` tests from `BTCPayServer.Plugins.Floresta.Tests`.
+- `floresta` on regtest.
 
-It does not start `bitcoind` or NBXplorer. These tests cover RPC/Electrum readiness, descriptor registration, descriptor listing, basic rescan behavior, Electrum headers/features/fee, empty scripthash wallet queries, and explicit broadcast errors.
+It does not start `bitcoind` or NBXplorer. Run `dotnet test` from the host to execute the `Integration=Integration` tests.
 
 For browser-level E2E coverage, use the optional profile:
 
 ```bash
-docker compose -f docker-compose.integration.yml --profile e2e up --build --abort-on-container-exit --exit-code-from e2e-tests e2e-tests
-docker compose -f docker-compose.integration.yml --profile e2e down -v
+docker compose -f docker-compose.integration.yml --profile full up -d floresta postgres bitcoind utreexod
+
+dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj \
+  --filter "Playwright=Playwright"
+
+docker compose -f docker-compose.integration.yml --profile full down -v
 ```
 
-This adds temporary Postgres, starts BTCPay Server with `BTCPAY_DEBUG_PLUGINS` pointing at the Floresta plugin, and runs the `Playwright=Playwright` tests through the settings and invoice payment flow. The browser E2E profile also starts `bitcoind` only as a regtest miner/payer and `utreexod` only as a Utreexo proof peer, matching Floresta's own confirmed-wallet regtest fixtures. `florestad` exposes `sendrawtransaction`, `loaddescriptor` and `rescanblockchain`, but not `generatetoaddress`/`generateblock`, so the test keeps `bitcoind` for funds and blocks. These test-only services are not part of the production deployment and NBXplorer is still not started.
+The `full` profile adds temporary Postgres, `bitcoind` for regtest funds/blocks, and `utreexod` as a Utreexo proof peer. These services are test-only; NBXplorer is still not started.

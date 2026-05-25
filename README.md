@@ -103,22 +103,30 @@ This starts BTCPay Server, Postgres, and Floresta only, with `FLORESTA_REPLACE_B
 Run integration tests against a real `florestad` in Docker:
 
 ```bash
-docker compose -f docker-compose.integration.yml up --build --abort-on-container-exit --exit-code-from tests
+docker compose -f docker-compose.integration.yml up -d floresta
+
+dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj \
+  --filter "Integration=Integration"
+
 docker compose -f docker-compose.integration.yml down -v
 ```
 
 Run the Playwright E2E tests against BTCPay Server + real `florestad`:
 
 ```bash
-docker compose -f docker-compose.integration.yml --profile e2e up --build --abort-on-container-exit --exit-code-from e2e-tests e2e-tests
-docker compose -f docker-compose.integration.yml --profile e2e down -v
+docker compose -f docker-compose.integration.yml --profile full up -d floresta postgres bitcoind utreexod
+
+dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj \
+  --filter "Playwright=Playwright"
+
+docker compose -f docker-compose.integration.yml --profile full down -v
 ```
 
-The test suite is consolidated in `BTCPayServer.Plugins.Floresta.Tests`. The integration compose runs the `Integration=Integration` trait, and the E2E profile runs the `Playwright=Playwright` trait. The E2E profile adds temporary Postgres, starts a real BTCPay Server process with `BTCPAY_DEBUG_PLUGINS` pointing to this plugin, opens Chromium via Playwright, registers admin users, saves Floresta settings, checks the health panel, verifies generated/hot/seed wallet setup paths are hidden or blocked, imports a BTC native SegWit xpub, creates an invoice, pays it, mines one regtest block, and checks that the invoice settles and the wallet transaction appears.
+The integration compose only starts infrastructure; run `dotnet test` from the host to select the `Integration=Integration` or `Playwright=Playwright` trait.
 
-The browser E2E topology is `florestad + bitcoind + utreexod`, matching Floresta's own confirmed-wallet regtest fixtures. The `utreexod` image is test-only and is built from `https://github.com/utreexo/utreexod.git` at `UTREEXOD_REF`, defaulting to `main`; override `UTREEXOD_REPO` or `UTREEXOD_REF` if a pinned fork or commit is needed. `bitcoind` remains only a transient regtest miner/payer for this browser test. Neither `bitcoind` nor `utreexod` is part of the runtime deployment, and NBXplorer is still not started.
+The `full` profile adds temporary Postgres, `bitcoind` for regtest funds/blocks, and `utreexod` as a Utreexo proof peer. These services are test-only; NBXplorer is still not started.
 
-The integration compose expects a local Floresta checkout next to this repository and the BTCPay Server submodule initialized. If your checkouts are elsewhere, set `FLORESTA_REPO` and `BTCPAYSERVER_REPO` when running Docker Compose.
+The integration compose pins the current `dlsz/floresta` image digest by default and sets `FLORESTA_PLATFORM=linux/amd64`. Set `FLORESTA_IMAGE` to use another tag, digest, or local image. The BTCPay Server submodule must still be initialized; set `BTCPAYSERVER_REPO` if that checkout is elsewhere.
 
 Razor views compile on build so external plugin loading and Playwright E2E can exercise the actual BTCPay UI.
 
