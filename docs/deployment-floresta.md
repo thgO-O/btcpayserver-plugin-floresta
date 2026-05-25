@@ -221,6 +221,15 @@ This starts only:
 
 It does not start `bitcoind` or NBXplorer. Run `dotnet test` from the host to execute the `Integration=Integration` tests.
 
+For local regtest development, use the `full` profile:
+
+```bash
+docker compose -f docker-compose.integration.yml --profile full up -d dev
+docker compose -f docker-compose.integration.yml --profile full down -v
+```
+
+The `dev` container is only a bootstrap target, matching BTCPay Server's test compose pattern.
+
 For browser-level E2E coverage, use the optional profile:
 
 ```bash

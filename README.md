@@ -111,6 +111,13 @@ dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Te
 docker compose -f docker-compose.integration.yml down -v
 ```
 
+Start the full regtest infrastructure for local development:
+
+```bash
+docker compose -f docker-compose.integration.yml --profile full up -d dev
+docker compose -f docker-compose.integration.yml --profile full down -v
+```
+
 Run the Playwright E2E tests against BTCPay Server + real `florestad`:
 
 ```bash

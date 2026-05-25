@@ -32,6 +32,28 @@ services:
       retries: 60
       start_period: 5s
 
+  dev:
+    image: alpine:3.20
+    profiles: ["full"]
+    command:
+      - /bin/sh
+      - -c
+      - |
+        trap : TERM INT
+        while :; do
+          echo "Floresta regtest infrastructure is ready."
+          sleep 2073600
+        done & wait
+    depends_on:
+      floresta:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      bitcoind:
+        condition: service_healthy
+      utreexod:
+        condition: service_healthy
+
   postgres:
     image: postgres:16
     profiles: ["full"]
