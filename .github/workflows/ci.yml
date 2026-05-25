@@ -21,7 +21,28 @@ jobs:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: true
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
-      FLORESTA_REPO: https://github.com/getfloresta/Floresta.git#v0.9.1
+      FLORESTA_NETWORK: regtest
+      FLORESTA_REPLACE_BTCPAY_BACKEND: "true"
+      FLORESTA_RPC_URL: http://127.0.0.1:18442
+      FLORESTA_ELECTRUM_HOST: 127.0.0.1
+      FLORESTA_ELECTRUM_PORT: "20001"
+      FLORESTA_ELECTRUM_TLS: "false"
+      FLORESTA_READY_TIMEOUT_SECONDS: "120"
+      FLORESTA_FALLBACK_FEE_SAT_PER_VB: "1"
+      FLORESTA_FILTERS_START_HEIGHT: "0"
+      FLORESTA_GAP_LIMIT: "100"
+      BTCPAYSERVER_PROJECT: ${{ github.workspace }}/submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj
+      E2E_POSTGRES: "User ID=postgres;Password=postgres;Include Error Detail=true;Host=127.0.0.1;Port=39372;Database=btcpayserver"
+      E2E_READY_TIMEOUT_SECONDS: "240"
+      E2E_BITCOIND_RPC: "server=http://127.0.0.1:43782;ceiwHEbqWI83:DwubwWsoo3"
+      E2E_BITCOIND_P2P_HOST: 127.0.0.1
+      E2E_BITCOIND_P2P_PORT: "39388"
+      E2E_UTREEXOD_RPC_URL: https://127.0.0.1:38332
+      E2E_UTREEXOD_RPC_USER: test
+      E2E_UTREEXOD_RPC_PASSWORD: test
+      E2E_UTREEXOD_P2P_HOST: 127.0.0.1
+      E2E_UTREEXOD_P2P_PORT: "38333"
+      PLAYWRIGHT_HEADLESS: "true"
 
     steps:
       - uses: actions/checkout@v4
@@ -44,11 +65,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nuget-
 
-      - name: Set Docker test user
-        run: |
-          echo "DOTNET_TEST_UID=$(id -u)" >> "$GITHUB_ENV"
-          echo "DOTNET_TEST_GID=$(id -g)" >> "$GITHUB_ENV"
-
       - name: Build plugin and tests
         run: >
           dotnet build BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj
@@ -70,20 +86,50 @@ jobs:
           -p:EnableNETAnalyzers=false
           -nr:false
 
+      - name: Start integration infrastructure
+        run: docker compose -f docker-compose.integration.yml up -d floresta
+
       - name: Run integration tests
         run: >
-          docker compose -f docker-compose.integration.yml
-          up --build --abort-on-container-exit --exit-code-from tests tests
+          dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj
+          --no-build
+          --filter "Integration=Integration"
+          --logger "console;verbosity=normal"
+          -m:1
+          -p:UseSharedCompilation=false
+          -p:RunAnalyzers=false
+          -p:EnableNETAnalyzers=false
+          -nr:false
 
       - name: Cleanup integration stack
         if: always()
         run: docker compose -f docker-compose.integration.yml down --volumes --remove-orphans
 
+      - name: Install Playwright browsers
+        run: |
+          dotnet tool install --global Microsoft.Playwright.CLI
+          ~/.dotnet/tools/playwright install chromium --with-deps
+
+      - name: Start Playwright E2E infrastructure
+        run: docker compose -f docker-compose.integration.yml --profile full up -d floresta postgres bitcoind utreexod
+
+      - name: Set Playwright E2E P2P endpoints
+        run: |
+          echo "E2E_BITCOIND_P2P_HOST=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(docker compose -f docker-compose.integration.yml ps -q bitcoind)")" >> "$GITHUB_ENV"
+          echo "E2E_UTREEXOD_P2P_HOST=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(docker compose -f docker-compose.integration.yml ps -q utreexod)")" >> "$GITHUB_ENV"
+
       - name: Run Playwright E2E tests
         run: >
-          docker compose -f docker-compose.integration.yml --profile e2e
-          up --build --abort-on-container-exit --exit-code-from e2e-tests e2e-tests
+          dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj
+          --no-build
+          --filter "Playwright=Playwright"
+          --logger "console;verbosity=normal"
+          -m:1
+          -p:UseSharedCompilation=false
+          -p:RunAnalyzers=false
+          -p:EnableNETAnalyzers=false
+          -nr:false
 
       - name: Cleanup Playwright E2E stack
         if: always()
-        run: docker compose -f docker-compose.integration.yml --profile e2e down --volumes --remove-orphans
+        run: docker compose -f docker-compose.integration.yml --profile full down --volumes --remove-orphans
