@@ -223,13 +223,13 @@ public class FlorestaListener : IHostedService
         FlorestaWalletTracker.NewTransactionInfo txInfo,
         BTCPayNetwork network, BTCPayWallet wallet, PaymentMethodId pmi)
     {
+        wallet.InvalidateCache(txInfo.DerivationStrategy);
+
         foreach (var output in txInfo.Outputs)
         {
             var invoice = await _invoiceRepository.GetInvoiceFromAddress(pmi, output.TrackedDestination);
             if (invoice == null)
                 continue;
-
-            wallet.InvalidateCache(txInfo.DerivationStrategy);
 
             var paymentData = new PaymentData
             {

@@ -25,6 +25,7 @@ public class TrackedAddress
     public byte[] ScriptPubKey { get; set; }
     public string Address { get; set; }
     public bool IsChange { get; set; }
+    public bool IsReserved { get; set; }
     public bool IsUsed { get; set; }
 
     public TrackedWallet Wallet { get; set; }

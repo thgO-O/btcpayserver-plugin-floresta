@@ -166,7 +166,7 @@ Use this sequence when descriptors or the plugin cache need to be recovered:
 1. Register descriptors from Server Settings > Floresta, or let wallet tracking do it automatically when `AutoRegisterDescriptors=true`.
 2. Rescan Floresta from a height that covers the wallet history.
 3. Use the wallet UTXO cache wipe endpoint/action to clear local `utxos` and `transactions`.
-4. Start a wallet scan. The plugin keeps `tracked_wallets`, `tracked_addresses`, gap indexes, and `IsUsed` flags, derives only missing address ranges, and rebuilds the cache from `get_history` and `listunspent`.
+4. Start a wallet scan. The plugin keeps `tracked_wallets`, `tracked_addresses`, gap indexes, `IsReserved` flags, and `IsUsed` flags, derives only missing address ranges, and rebuilds the cache from `get_history` and `listunspent`.
 
 The cache wipe is intentionally not a wallet reset. It avoids address reuse by preserving local derivation and usage state.
 
