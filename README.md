@@ -29,7 +29,7 @@ Wallet recovery is intentionally two-stage:
 
 - Floresta stores and validates wallet descriptors and can rescan from the configured start height.
 - The plugin stores tracked wallet metadata, derived addresses, gap indexes, local transactions, and local UTXOs.
-- Wiping the wallet UTXO cache removes local `utxos` and `transactions` only. It preserves tracked wallets, tracked addresses, gap indexes, and `IsUsed` flags so addresses are not reused.
+- Wiping the wallet UTXO cache removes local `utxos` and `transactions` only. It preserves tracked wallets, tracked addresses, gap indexes, `IsReserved` flags, and `IsUsed` flags so addresses are not reused.
 - Scanning the wallet reuses existing tracked addresses, derives only missing ranges, and rebuilds the local UTXO/transaction cache from Floresta Electrum history and unspent outputs.
 
 ## Current Alpha Status
