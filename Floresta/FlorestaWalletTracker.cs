@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -855,25 +856,25 @@ public class FlorestaWalletTracker
 
         try
         {
-            await _client.TransactionBroadcastAsync(rawTx, ct);
+            await _rpcClient.SendRawTransactionAsync(rawTx, ct);
             return new BroadcastResult(true);
         }
-        catch (FlorestaElectrumException ex)
+        catch (Exception rpcEx) when (rpcEx is FlorestaRpcException or InvalidOperationException or HttpRequestException)
         {
             try
             {
-                await _rpcClient.SendRawTransactionAsync(rawTx, ct);
+                await _client.TransactionBroadcastAsync(rawTx, ct);
                 return new BroadcastResult(true);
             }
-            catch (Exception rpcEx)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 return new BroadcastResult(false)
                 {
-                    RPCMessage = $"Electrum broadcast failed: {ex.Message}; RPC broadcast failed: {rpcEx.Message}"
+                    RPCMessage = $"RPC broadcast failed: {rpcEx.Message}; Electrum broadcast failed: {ex.Message}"
                 };
             }
         }
-        catch (FlorestaRpcException ex)
+        catch (FlorestaElectrumException ex)
         {
             return new BroadcastResult(false)
             {
