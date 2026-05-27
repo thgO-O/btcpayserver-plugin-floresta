@@ -55,12 +55,14 @@ public class UIFlorestaController : Controller
     public async Task<IActionResult> Settings(FlorestaSettings settings, string command)
     {
         SetViewBags();
+        var existingSettings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+        settings.PreserveSecretsFrom(existingSettings);
 
         if (command == "test")
         {
             try
             {
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                 await using var testClient = new FlorestaElectrumClient(
                     settings,
                     NullLogger<FlorestaElectrumClient>.Instance);
@@ -83,6 +85,8 @@ public class UIFlorestaController : Controller
                     null);
                 ViewBag.StatusMessage =
                     $"Connection successful. Electrum: {sw} protocol {pv}. RPC {FlorestaChainInfoParser.Format(chainInfo)}.";
+                if (FlorestaBackendMode.IsBackendReplacementEnabled() && settings.IsBitcoinBackendActive())
+                    await RefreshStatusAfterSettingsUpdate();
             }
             catch (Exception ex)
             {
@@ -97,10 +101,10 @@ public class UIFlorestaController : Controller
 
         if (command == "register")
         {
-            if (!FlorestaBackendMode.IsBackendReplacementEnabled())
+            if (!settings.IsBitcoinBackendActive())
             {
                 ViewBag.StatusMessage =
-                    $"Backend replacement is inactive. Set {FlorestaBackendMode.ReplaceBackendEnvironmentVariable}=true and restart BTCPay Server before registering descriptors.";
+                    $"Floresta Bitcoin backend is inactive. Enable the plugin, enable Bitcoin backend mode, set {FlorestaBackendMode.ReplaceBackendEnvironmentVariable}=true, and restart BTCPay Server before registering descriptors.";
                 return View(settings);
             }
 
@@ -124,10 +128,10 @@ public class UIFlorestaController : Controller
 
         if (command == "rescan")
         {
-            if (!FlorestaBackendMode.IsBackendReplacementEnabled())
+            if (!settings.IsBitcoinBackendActive())
             {
                 ViewBag.StatusMessage =
-                    $"Backend replacement is inactive. Set {FlorestaBackendMode.ReplaceBackendEnvironmentVariable}=true and restart BTCPay Server before requesting a rescan.";
+                    $"Floresta Bitcoin backend is inactive. Enable the plugin, enable Bitcoin backend mode, set {FlorestaBackendMode.ReplaceBackendEnvironmentVariable}=true, and restart BTCPay Server before requesting a rescan.";
                 return View(settings);
             }
 

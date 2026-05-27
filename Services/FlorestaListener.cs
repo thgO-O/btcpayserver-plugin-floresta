@@ -28,6 +28,7 @@ public class FlorestaListener : IHostedService
     private readonly FlorestaElectrumClient _electrumClient;
     private readonly FlorestaWalletTracker _tracker;
     private readonly FlorestaStatusMonitor _statusMonitor;
+    private readonly SettingsRepository _settingsRepository;
     private readonly BTCPayWalletProvider _walletProvider;
     private readonly InvoiceRepository _invoiceRepository;
     private readonly EventAggregator _eventAggregator;
@@ -35,9 +36,11 @@ public class FlorestaListener : IHostedService
     private readonly PaymentMethodHandlerDictionary _handlers;
     private readonly BTCPayNetworkProvider _networkProvider;
     private readonly ILogger<FlorestaListener> _logger;
+    private readonly SemaphoreSlim _initializationLock = new(1, 1);
     private readonly object _paymentPollingGate = new();
     private CancellationTokenSource _cts;
     private Task _listenTask;
+    private bool _listenerInitialized;
     private bool _paymentPollingRunning;
     private bool _paymentPollingPending;
 
@@ -45,6 +48,7 @@ public class FlorestaListener : IHostedService
         FlorestaElectrumClient electrumClient,
         FlorestaWalletTracker tracker,
         FlorestaStatusMonitor statusMonitor,
+        SettingsRepository settingsRepository,
         BTCPayWalletProvider walletProvider,
         InvoiceRepository invoiceRepository,
         EventAggregator eventAggregator,
@@ -56,6 +60,7 @@ public class FlorestaListener : IHostedService
         _electrumClient = electrumClient;
         _tracker = tracker;
         _statusMonitor = statusMonitor;
+        _settingsRepository = settingsRepository;
         _walletProvider = walletProvider;
         _invoiceRepository = invoiceRepository;
         _eventAggregator = eventAggregator;
@@ -69,8 +74,10 @@ public class FlorestaListener : IHostedService
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
-        foreach (var wallet in _walletProvider.GetWallets())
-            wallet.ForceInefficientPath = true;
+        var bitcoinNetwork = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
+        var bitcoinWallet = bitcoinNetwork is null ? null : _walletProvider.GetWallet(bitcoinNetwork);
+        if (bitcoinWallet is not null)
+            bitcoinWallet.ForceInefficientPath = true;
 
         _electrumClient.OnScripthashNotification += OnScripthashNotification;
         _electrumClient.OnNewBlock += OnNewBlock;
@@ -95,31 +102,65 @@ public class FlorestaListener : IHostedService
 
     private async Task RunAsync(CancellationToken ct)
     {
-        // Wait for Electrum connection
         while (!ct.IsCancellationRequested)
         {
-            if (_electrumClient.IsConnected)
-                break;
-            try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { return; }
-        }
+            try
+            {
+                if (!await IsBitcoinBackendActiveAsync(ct))
+                {
+                    _listenerInitialized = false;
+                    await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                    continue;
+                }
 
+                if (!_electrumClient.IsConnected)
+                {
+                    _listenerInitialized = false;
+                    await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                    continue;
+                }
+
+                var initializedHeight = await InitializeListenerAsync(ct);
+                if (initializedHeight is not null)
+                    await RequestPaymentPollingAsync(ct);
+
+                await Task.Delay(TimeSpan.FromSeconds(10), ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                _listenerInitialized = false;
+                _logger.LogError(ex, "Error during Electrum listener initialization; retrying");
+                try { await Task.Delay(TimeSpan.FromSeconds(10), ct); } catch (OperationCanceledException) { return; }
+            }
+        }
+    }
+
+    private async Task<int?> InitializeListenerAsync(CancellationToken ct)
+    {
+        await _initializationLock.WaitAsync(ct);
         try
         {
+            if (_listenerInitialized)
+                return null;
+
             await _tracker.InitializeAsync(ct);
 
             var header = await _electrumClient.HeadersSubscribeAsync(ct);
-            _statusMonitor.UpdateTipHeight(header.Height);
+            _statusMonitor.SetTipHeight(header.Height);
             _tracker.SetTipHeight(header.Height);
             await _statusMonitor.RefreshAsync(ct);
 
-            await RequestPaymentPollingAsync(ct);
-
+            _listenerInitialized = true;
             _logger.LogInformation("Electrum listener initialized, tip height: {Height}", header.Height);
+            return header.Height;
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogError(ex, "Error during Electrum listener initialization");
+            _initializationLock.Release();
         }
     }
 
@@ -130,6 +171,9 @@ public class FlorestaListener : IHostedService
             try
             {
                 var ct = _cts?.Token ?? CancellationToken.None;
+                if (!await IsBitcoinBackendActiveAsync(ct))
+                    return;
+
                 var newTxs = await _tracker.HandleScripthashNotificationAsync(scripthash, status, ct);
 
                 await ProcessNewTransactions(newTxs, ct);
@@ -149,6 +193,9 @@ public class FlorestaListener : IHostedService
             try
             {
                 var ct = _cts?.Token ?? CancellationToken.None;
+                if (!await IsBitcoinBackendActiveAsync(ct))
+                    return;
+
                 _statusMonitor.UpdateTipHeight(header.Height);
                 await _statusMonitor.RefreshAsync(ct);
 
@@ -170,13 +217,13 @@ public class FlorestaListener : IHostedService
         try
         {
             var ct = _cts?.Token ?? CancellationToken.None;
+            if (!await IsBitcoinBackendActiveAsync(ct))
+                return;
+
             _logger.LogInformation("Electrum reconnected, re-initializing tracker");
-            await _tracker.InitializeAsync(ct);
-            var header = await _electrumClient.HeadersSubscribeAsync(ct);
-            _statusMonitor.UpdateTipHeight(header.Height);
-            _tracker.SetTipHeight(header.Height);
-            await _statusMonitor.RefreshAsync(ct);
-            var newTxs = await _tracker.HandleNewBlockAsync(header.Height, ct);
+            _listenerInitialized = false;
+            var initializedHeight = await InitializeListenerAsync(ct);
+            var newTxs = await _tracker.HandleNewBlockAsync(initializedHeight ?? _statusMonitor.TipHeight, ct);
             await ProcessNewTransactions(newTxs, ct);
             await RequestPaymentPollingAsync(ct);
             await PublishChainUpdate(ct);
@@ -419,5 +466,12 @@ public class FlorestaListener : IHostedService
         {
             _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
         }
+    }
+
+    private async Task<bool> IsBitcoinBackendActiveAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+        return settings.IsBitcoinBackendActive();
     }
 }

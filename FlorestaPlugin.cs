@@ -9,6 +9,8 @@ using BTCPayServer.Plugins.Floresta.Filters;
 using BTCPayServer.Plugins.Floresta.Services;
 using BTCPayServer.Services;
 using BTCPayServer.Services.Fees;
+using BTCPayServer.Services.Reporting;
+using BTCPayServer.Services.Wallets;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -44,25 +46,23 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         RemoveByImplementation<ExplorerClientProvider>(services);
         RemoveByServiceType<Common.IExplorerClientProvider>(services);
 
-        // NBXplorerConnectionFactory (singleton + hosted service)
-        RemoveHostedService<NBXplorerConnectionFactory>(services);
-        RemoveByImplementation<NBXplorerConnectionFactory>(services);
-
         // NBXplorerListener (hosted service)
         RemoveHostedService<NBXplorerListener>(services);
-
-        // NBXplorerWaiters (hosted service)
-        RemoveHostedService<NBXplorerWaiters>(services);
 
         // NBXplorerDashboard
         RemoveByImplementation<NBXplorerDashboard>(services);
 
-        // ISyncSummaryProvider
-        RemoveByServiceType<ISyncSummaryProvider>(services);
+        // Replace only the default NBXplorer sync summary. Other summary providers
+        // registered by BTCPay or plugins are unrelated.
+        RemoveByImplementation<NBXSyncSummaryProvider>(services);
 
-        // FeeProviderFactory (singleton + interface + scheduled task)
-        RemoveScheduledTask<FeeProviderFactory>(services);
-        RemoveByImplementation<FeeProviderFactory>(services);
+        // These DB-backed services can still use NBXplorer for non-BTC networks,
+        // but must not query NBXplorer's BTC rows when BTC is backed by Floresta.
+        RemoveByImplementation<OnChainWalletReportProvider>(services);
+        RemoveByServiceType<WalletHistogramService>(services);
+
+        // FeeProviderFactory interface only. Keep the concrete factory and its
+        // scheduled task for non-BTC networks; FlorestaFeeProviderFactory wraps it.
         RemoveByServiceType<IFeeProviderFactory>(services);
 
 
@@ -79,6 +79,9 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
             var factory = provider.GetRequiredService<FlorestaDbContextFactory>();
             factory.ConfigureBuilder(o);
         });
+        services.AddSingleton<FlorestaDbMigrationHostedService>();
+        services.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(sp =>
+            sp.GetRequiredService<FlorestaDbMigrationHostedService>());
 
         // HTTP handler for shimming ExplorerClient calls
         services.AddSingleton<FlorestaHttpHandler>();
@@ -95,16 +98,17 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<ExplorerClientProvider>(sp => sp.GetRequiredService<FlorestaExplorerClientProvider>());
         services.AddSingleton<Common.IExplorerClientProvider>(sp => sp.GetRequiredService<FlorestaExplorerClientProvider>());
 
-        // NBXplorerConnectionFactory replacement (Available = false)
-        services.AddSingleton<FlorestaConnectionFactory>();
-        services.AddSingleton<NBXplorerConnectionFactory>(sp => sp.GetRequiredService<FlorestaConnectionFactory>());
-
         // Fee estimation
         services.AddSingleton<FlorestaFeeProvider>();
         services.AddSingleton<FlorestaFeeProviderFactory>();
         services.AddSingleton<IFeeProviderFactory>(sp => sp.GetRequiredService<FlorestaFeeProviderFactory>());
 
-        // Status monitoring (replaces NBXplorerWaiters)
+        // NBXplorer DB-backed UX for non-BTC networks only.
+        services.AddSingleton<FlorestaOnChainWalletReportProvider>();
+        services.AddSingleton<ReportProvider>(sp => sp.GetRequiredService<FlorestaOnChainWalletReportProvider>());
+        services.AddSingleton<WalletHistogramService, FlorestaWalletHistogramService>();
+
+        // BTC status monitoring. NBXplorerWaiters stays registered for non-BTC networks.
         services.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(sp => sp.GetRequiredService<FlorestaStatusMonitor>());
 
         // Payment listener (replaces NBXplorerListener)
@@ -113,6 +117,8 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         // Sync summary
         services.AddSingleton<FlorestaSyncSummaryProvider>();
         services.AddSingleton<ISyncSummaryProvider>(sp => sp.GetRequiredService<FlorestaSyncSummaryProvider>());
+        services.AddSingleton<FlorestaNonBitcoinSyncSummaryProvider>();
+        services.AddSingleton<ISyncSummaryProvider>(sp => sp.GetRequiredService<FlorestaNonBitcoinSyncSummaryProvider>());
 
         // ──────────────────────────────────────────────
         // 5. Admin UI
@@ -141,29 +147,6 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         var descriptors = services.Where(d => d.ServiceType == typeof(T)).ToList();
         foreach (var d in descriptors)
             services.Remove(d);
-    }
-
-    private static void RemoveScheduledTask<T>(IServiceCollection services)
-    {
-        var descriptors = services
-            .Where(d => IsScheduledTaskDescriptorFor<T>(services, d))
-            .ToList();
-
-        foreach (var d in descriptors)
-            services.Remove(d);
-    }
-
-    private static bool IsScheduledTaskDescriptorFor<T>(IServiceCollection services, ServiceDescriptor descriptor)
-    {
-        if (descriptor.ServiceType != typeof(ScheduledTask) ||
-            descriptor.ImplementationFactory is null)
-            return false;
-
-        var scheduledTaskIndex = services.IndexOf(descriptor);
-        if (scheduledTaskIndex <= 0)
-            return false;
-
-        return IsServiceRegistrationFor<T>(services[scheduledTaskIndex - 1]);
     }
 
     private static void RemoveHostedService<T>(IServiceCollection services)
