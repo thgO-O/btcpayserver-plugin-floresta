@@ -65,6 +65,9 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         // scheduled task for non-BTC networks; FlorestaFeeProviderFactory wraps it.
         RemoveByServiceType<IFeeProviderFactory>(services);
 
+        // Keep the concrete NBXplorer connection factory for non-BTC reports and
+        // wallet queries, but do not let BTCPay start it for BTC-only Floresta mode.
+        RemoveHostedService<NBXplorerConnectionFactory>(services);
 
         // ──────────────────────────────────────────────
         // 2. Register Floresta engine
@@ -104,6 +107,9 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<IFeeProviderFactory>(sp => sp.GetRequiredService<FlorestaFeeProviderFactory>());
 
         // NBXplorer DB-backed UX for non-BTC networks only.
+        services.AddSingleton<FlorestaNonBitcoinNbxplorerConnectionHostedService>();
+        services.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(sp =>
+            sp.GetRequiredService<FlorestaNonBitcoinNbxplorerConnectionHostedService>());
         services.AddSingleton<FlorestaOnChainWalletReportProvider>();
         services.AddSingleton<ReportProvider>(sp => sp.GetRequiredService<FlorestaOnChainWalletReportProvider>());
         services.AddSingleton<WalletHistogramService, FlorestaWalletHistogramService>();

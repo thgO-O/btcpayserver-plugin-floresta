@@ -8,6 +8,7 @@
         .SetCategory(WellKnownCategories.Server));
     var health = ViewBag.Health as FlorestaHealthSnapshot;
     var backendReplacementEnabled = ViewBag.BackendReplacementEnabled is bool enabled && enabled;
+    var bitcoinBackendActive = ViewBag.BitcoinBackendActive is bool active && active;
     var replaceBackendEnvironmentVariable = ViewBag.ReplaceBackendEnvironmentVariable as string ?? FlorestaBackendMode.ReplaceBackendEnvironmentVariable;
 }
 
@@ -180,8 +181,8 @@
 
             <button type="submit" class="btn btn-primary mt-4" id="SaveFlorestaSettings">Save</button>
             <button type="submit" name="command" value="test" class="btn btn-secondary mt-4">Test Connection</button>
-            <button type="submit" name="command" value="register" class="btn btn-secondary mt-4" disabled="@(!backendReplacementEnabled)">Register Descriptors</button>
-            <button type="submit" name="command" value="rescan" class="btn btn-secondary mt-4" disabled="@(!backendReplacementEnabled)">Rescan from Height</button>
+            <button type="submit" name="command" value="register" class="btn btn-secondary mt-4" disabled="@(!bitcoinBackendActive)">Register Descriptors</button>
+            <button type="submit" name="command" value="rescan" class="btn btn-secondary mt-4" disabled="@(!bitcoinBackendActive)">Rescan from Height</button>
         </form>
 
         @if (ViewBag.StatusMessage != null)

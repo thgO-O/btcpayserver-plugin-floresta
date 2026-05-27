@@ -33,6 +33,73 @@ public class FlorestaSettingsTests
         });
     }
 
+    [Fact]
+    public void PreserveSecretsFromKeepsExistingPasswordWhenPostedPasswordIsBlank()
+    {
+        var posted = new FlorestaSettings { RpcPassword = "" };
+        var existing = new FlorestaSettings { RpcPassword = "secret" };
+
+        posted.PreserveSecretsFrom(existing);
+
+        Assert.Equal("secret", posted.RpcPassword);
+    }
+
+    [Fact]
+    public void PreserveSecretsFromKeepsExistingPasswordWhenPostedPasswordIsNull()
+    {
+        var posted = new FlorestaSettings { RpcPassword = null };
+        var existing = new FlorestaSettings { RpcPassword = "secret" };
+
+        posted.PreserveSecretsFrom(existing);
+
+        Assert.Equal("secret", posted.RpcPassword);
+    }
+
+    [Fact]
+    public void IsBitcoinBackendActiveRequiresStartupGateAndSavedSettings()
+    {
+        EnvironmentVariableTestHelper.WithBackendReplacementEnvironment("true", () =>
+        {
+            Assert.True(new FlorestaSettings
+            {
+                Enabled = true,
+                UseFlorestaAsBitcoinBackend = true,
+                CryptoCode = "BTC"
+            }.IsBitcoinBackendActive());
+
+            Assert.False(new FlorestaSettings
+            {
+                Enabled = false,
+                UseFlorestaAsBitcoinBackend = true,
+                CryptoCode = "BTC"
+            }.IsBitcoinBackendActive());
+
+            Assert.False(new FlorestaSettings
+            {
+                Enabled = true,
+                UseFlorestaAsBitcoinBackend = false,
+                CryptoCode = "BTC"
+            }.IsBitcoinBackendActive());
+
+            Assert.False(new FlorestaSettings
+            {
+                Enabled = true,
+                UseFlorestaAsBitcoinBackend = true,
+                CryptoCode = "LTC"
+            }.IsBitcoinBackendActive());
+        });
+
+        EnvironmentVariableTestHelper.WithBackendReplacementEnvironment(null, () =>
+        {
+            Assert.False(new FlorestaSettings
+            {
+                Enabled = true,
+                UseFlorestaAsBitcoinBackend = true,
+                CryptoCode = "BTC"
+            }.IsBitcoinBackendActive());
+        });
+    }
+
     private static void WithEnvironment(string variable, string value, Action action)
     {
         lock (EnvLock)

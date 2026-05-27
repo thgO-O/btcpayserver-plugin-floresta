@@ -71,7 +71,7 @@ public class FlorestaWalletTracker
             _addressPool,
             _utxoCache,
             _trackedStrategies,
-            () => _tipHeight,
+            () => Volatile.Read(ref _tipHeight),
             _network,
             _logger);
         _broadcaster = new FlorestaTransactionBroadcaster(_rpcClient, _client);
@@ -100,7 +100,7 @@ public class FlorestaWalletTracker
         {
             var tipState = await ctx.SyncStates.FindAsync(new object[] { "tip_height" }, ct);
             if (tipState != null && int.TryParse(tipState.Value, out var savedTip))
-                _tipHeight = savedTip;
+                SetTipHeight(savedTip);
 
             var wallets = await ctx.TrackedWallets.ToListAsync(ct);
             walletsToSubscribe = new();
@@ -684,7 +684,7 @@ public class FlorestaWalletTracker
     {
         while (true)
         {
-            var current = _tipHeight;
+            var current = Volatile.Read(ref _tipHeight);
             if (height <= current)
                 return current;
 

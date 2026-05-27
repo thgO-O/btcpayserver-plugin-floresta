@@ -40,7 +40,7 @@ public class FlorestaListener : IHostedService
     private readonly object _paymentPollingGate = new();
     private CancellationTokenSource _cts;
     private Task _listenTask;
-    private bool _listenerInitialized;
+    private volatile bool _listenerInitialized;
     private bool _paymentPollingRunning;
     private bool _paymentPollingPending;
 

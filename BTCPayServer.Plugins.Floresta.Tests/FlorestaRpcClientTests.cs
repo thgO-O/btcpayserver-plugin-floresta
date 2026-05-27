@@ -41,7 +41,21 @@ public class FlorestaRpcClientTests
         Assert.True(result);
         Assert.Single(handler.Requests);
         Assert.Equal("loaddescriptor", handler.Requests[0].Method);
-        Assert.Equal("wpkh(xpub/0/*)", Assert.Single(handler.Requests[0].Params));
+        Assert.Equal("wpkh(xpub/0/*)", Assert.Single(handler.Requests[0].Params).GetString());
+    }
+
+    [Fact]
+    public async Task RescanBlockchainAsyncOmitsStopDependentArgumentsWhenStopHeightIsNull()
+    {
+        var handler = new RecordingRpcHandler(_ => new { result = new { } });
+        var client = CreateClient(handler);
+
+        await client.RescanBlockchainAsync(123, null, false, "medium", CancellationToken.None);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal("rescanblockchain", request.Method);
+        var param = Assert.Single(request.Params);
+        Assert.Equal(123, param.GetInt32());
     }
 
     [Fact]
@@ -88,7 +102,7 @@ public class FlorestaRpcClientTests
             var root = doc.RootElement;
             var rpcRequest = new RpcRequest(
                 root.GetProperty("method").GetString()!,
-                root.GetProperty("params").EnumerateArray().Select(e => e.GetString()).ToArray());
+                root.GetProperty("params").EnumerateArray().Select(e => e.Clone()).ToArray());
             Requests.Add(rpcRequest);
 
             return new HttpResponseMessage(HttpStatusCode.OK)
@@ -98,5 +112,5 @@ public class FlorestaRpcClientTests
         }
     }
 
-    private sealed record RpcRequest(string Method, string?[] Params);
+    private sealed record RpcRequest(string Method, JsonElement[] Params);
 }

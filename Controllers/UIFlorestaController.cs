@@ -47,16 +47,16 @@ public class UIFlorestaController : Controller
     public async Task<IActionResult> Settings()
     {
         var settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
-        SetViewBags();
+        SetViewBags(settings);
         return View(settings);
     }
 
     [HttpPost("~/server/floresta")]
     public async Task<IActionResult> Settings(FlorestaSettings settings, string command)
     {
-        SetViewBags();
         var existingSettings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
         settings.PreserveSecretsFrom(existingSettings);
+        SetViewBags(settings);
 
         if (command == "test")
         {
@@ -191,10 +191,11 @@ public class UIFlorestaController : Controller
         return new DescriptorRegistrationResult(storesScanned, storesWithWallet, alreadyRegistered, registered);
     }
 
-    private void SetViewBags()
+    private void SetViewBags(FlorestaSettings settings)
     {
         ViewBag.Health = _statusMonitor.GetHealthSnapshot();
         ViewBag.BackendReplacementEnabled = FlorestaBackendMode.IsBackendReplacementEnabled();
+        ViewBag.BitcoinBackendActive = settings.IsBitcoinBackendActive();
         ViewBag.ReplaceBackendEnvironmentVariable = FlorestaBackendMode.ReplaceBackendEnvironmentVariable;
     }
 

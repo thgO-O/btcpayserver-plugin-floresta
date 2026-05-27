@@ -61,7 +61,10 @@ public sealed class FlorestaSettingsPlaywrightTests : IAsyncLifetime
         await Expect(page.Locator("#FallbackFeeRateSatsPerByte")).ToHaveValueAsync("2.5");
         await Expect(page.Locator("#FlorestaHealthPanel")).ToBeVisibleAsync();
 
-        await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Test Connection" }).ClickAsync();
+        var testConnection = page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Test Connection" });
+        await Expect(testConnection).ToBeVisibleAsync();
+        await testConnection.EvaluateAsync("button => button.click()");
+        await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 30_000 });
         await Expect(page.GetByText(new Regex("Connection successful", RegexOptions.IgnoreCase))).ToBeVisibleAsync(new LocatorAssertionsToBeVisibleOptions
         {
             Timeout = 20_000
