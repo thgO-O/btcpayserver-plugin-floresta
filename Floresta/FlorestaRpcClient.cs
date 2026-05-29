@@ -77,11 +77,14 @@ public class FlorestaRpcClient
             parameters.Add(startHeight ?? 0);
             if (stopHeight is not null || useTimestamp || !string.IsNullOrEmpty(confidence))
             {
-                parameters.Add(stopHeight ?? 0);
-                if (useTimestamp || !string.IsNullOrEmpty(confidence))
+                if (stopHeight is not null)
                 {
-                    parameters.Add(useTimestamp);
-                    parameters.Add(string.IsNullOrEmpty(confidence) ? "medium" : confidence);
+                    parameters.Add(stopHeight.Value);
+                    if (useTimestamp || !string.IsNullOrEmpty(confidence))
+                    {
+                        parameters.Add(useTimestamp);
+                        parameters.Add(string.IsNullOrEmpty(confidence) ? "medium" : confidence);
+                    }
                 }
             }
         }

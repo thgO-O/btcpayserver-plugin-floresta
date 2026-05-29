@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Events;
 using BTCPayServer.HostedServices;
+using BTCPayServer.Services;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using NBXplorer.Models;
@@ -11,23 +12,24 @@ using NBXplorer.Models;
 namespace BTCPayServer.Plugins.Floresta.Services;
 
 /// <summary>
-/// Replaces NBXplorerWaiters. Monitors the Electrum server connection status
-/// and publishes state changes via EventAggregator.
+/// Monitors the Floresta-backed BTC connection and publishes state changes via EventAggregator.
 /// </summary>
 public class FlorestaStatusMonitor : IHostedService
 {
     private readonly FlorestaElectrumClient _client;
     private readonly FlorestaRpcClient _rpcClient;
+    private readonly SettingsRepository _settingsRepository;
     private readonly NBXplorerDashboard _dashboard;
     private readonly BTCPayNetworkProvider _networkProvider;
     private readonly EventAggregator _eventAggregator;
     private readonly ILogger<FlorestaStatusMonitor> _logger;
     private readonly SemaphoreSlim _stepLock = new(1, 1);
+    private int _tipHeight;
     private CancellationTokenSource _cts;
     private Task _monitorLoop;
 
     public NBXplorerState State { get; private set; } = NBXplorerState.NotConnected;
-    public int TipHeight { get; private set; }
+    public int TipHeight => Volatile.Read(ref _tipHeight);
     public string ServerVersion { get; private set; }
     public string BestBlockHash { get; private set; }
     public bool? IsInitialBlockDownload { get; private set; }
@@ -41,6 +43,7 @@ public class FlorestaStatusMonitor : IHostedService
     public FlorestaStatusMonitor(
         FlorestaElectrumClient client,
         FlorestaRpcClient rpcClient,
+        SettingsRepository settingsRepository,
         NBXplorerDashboard dashboard,
         BTCPayNetworkProvider networkProvider,
         EventAggregator eventAggregator,
@@ -48,6 +51,7 @@ public class FlorestaStatusMonitor : IHostedService
     {
         _client = client;
         _rpcClient = rpcClient;
+        _settingsRepository = settingsRepository;
         _dashboard = dashboard;
         _networkProvider = networkProvider;
         _eventAggregator = eventAggregator;
@@ -108,6 +112,18 @@ public class FlorestaStatusMonitor : IHostedService
     private async Task StepAsync(CancellationToken ct)
     {
         var oldState = State;
+        if (!await IsBitcoinBackendActiveAsync())
+        {
+            if (_client.IsConnected)
+                await _client.DisconnectAsync();
+
+            RpcReachable = false;
+            LastError = "Floresta Bitcoin backend is disabled.";
+            LastUpdated = DateTimeOffset.UtcNow;
+            ServerVersion = null;
+            SetState(NBXplorerState.NotConnected, oldState, null, null);
+            return;
+        }
 
         if (!_client.IsConnected)
         {
@@ -200,7 +216,8 @@ public class FlorestaStatusMonitor : IHostedService
     {
         var parsed = FlorestaChainInfoParser.Parse(blockchainInfo);
         ChainInfo = parsed;
-        TipHeight = parsed.Height ?? TipHeight;
+        if (parsed.Height is int height)
+            SetTipHeight(height);
         BestBlockHash = parsed.BestBlockHash ?? BestBlockHash;
         IsInitialBlockDownload = parsed.IsInitialBlockDownload ?? IsInitialBlockDownload;
         ValidatedHeight = parsed.ValidatedHeight ?? ValidatedHeight;
@@ -250,6 +267,25 @@ public class FlorestaStatusMonitor : IHostedService
 
     internal void UpdateTipHeight(int height)
     {
-        TipHeight = height;
+        while (true)
+        {
+            var current = TipHeight;
+            if (height <= current)
+                return;
+
+            if (Interlocked.CompareExchange(ref _tipHeight, height, current) == current)
+                return;
+        }
+    }
+
+    internal void SetTipHeight(int height)
+    {
+        Volatile.Write(ref _tipHeight, height);
+    }
+
+    private async Task<bool> IsBitcoinBackendActiveAsync()
+    {
+        var settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+        return settings.IsBitcoinBackendActive();
     }
 }

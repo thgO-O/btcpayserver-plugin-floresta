@@ -28,6 +28,9 @@ public class FlorestaFeeProvider : IFeeProvider
     public async Task<FeeRate> GetFeeRateAsync(int blockTarget = 20)
     {
         var settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+        if (!settings.IsBitcoinBackendActive())
+            throw new InvalidOperationException("Floresta Bitcoin backend is disabled.");
+
         var fallback = settings.FallbackFeeRateSatsPerByte;
 
         if (_cache.TryGetValue(blockTarget, out var cached) &&

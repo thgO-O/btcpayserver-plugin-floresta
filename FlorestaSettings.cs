@@ -73,6 +73,20 @@ public class FlorestaSettings
         set => ElectrumUseTls = value;
     }
 
+    public bool IsBitcoinBackendActive()
+    {
+        return FlorestaBackendMode.IsBackendReplacementEnabled() &&
+               Enabled &&
+               UseFlorestaAsBitcoinBackend &&
+               string.Equals(CryptoCode, "BTC", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public void PreserveSecretsFrom(FlorestaSettings existing)
+    {
+        if (string.IsNullOrEmpty(RpcPassword))
+            RpcPassword = existing?.RpcPassword;
+    }
+
     private static string GetString(string name, string fallback)
     {
         var value = Environment.GetEnvironmentVariable(name);

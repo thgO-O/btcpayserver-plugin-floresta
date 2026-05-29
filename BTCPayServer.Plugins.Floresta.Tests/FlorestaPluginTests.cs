@@ -10,6 +10,8 @@ using BTCPayServer.HostedServices;
 using BTCPayServer.Payments.Bitcoin;
 using BTCPayServer.Services;
 using BTCPayServer.Services.Fees;
+using BTCPayServer.Services.Reporting;
+using BTCPayServer.Services.Wallets;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using static BTCPayServer.Plugins.Floresta.Tests.EnvironmentVariableTestHelper;
@@ -57,7 +59,7 @@ public class FlorestaPluginTests
     }
 
     [Fact]
-    public void ReplacesCoreNbxplorerServicesWhenStartupGateIsEnabled()
+    public void ReplacesBitcoinNbxplorerServicesWhenStartupGateIsEnabled()
     {
         WithBackendReplacementEnvironment("true", () =>
         {
@@ -77,27 +79,52 @@ public class FlorestaPluginTests
                 descriptor.ServiceType == typeof(IExplorerClientProvider) &&
                 descriptor.ImplementationType == typeof(ExplorerClientProvider));
             Assert.DoesNotContain(services, descriptor =>
-                IsHostedServiceRegistrationFor<NBXplorerConnectionFactory>(services, descriptor));
-            Assert.DoesNotContain(services, descriptor =>
                 IsHostedServiceRegistrationFor<NBXplorerListener>(services, descriptor));
-            Assert.DoesNotContain(services, descriptor =>
-                IsHostedServiceRegistrationFor<NBXplorerWaiters>(services, descriptor));
             Assert.DoesNotContain(services, descriptor =>
                 descriptor.ServiceType == typeof(IFeeProviderFactory) &&
                 descriptor.ImplementationType == typeof(FeeProviderFactory));
             Assert.DoesNotContain(services, descriptor =>
-                IsScheduledTaskRegistrationFor<FeeProviderFactory>(services, descriptor));
+                descriptor.ServiceType == typeof(ISyncSummaryProvider) &&
+                descriptor.ImplementationType == typeof(NBXSyncSummaryProvider));
+            Assert.DoesNotContain(services, descriptor =>
+                descriptor.ServiceType == typeof(ReportProvider) &&
+                descriptor.ImplementationType == typeof(OnChainWalletReportProvider));
+            Assert.DoesNotContain(services, descriptor =>
+                descriptor.ServiceType == typeof(WalletHistogramService) &&
+                descriptor.ImplementationType == typeof(WalletHistogramService));
 
             Assert.Single(services, descriptor => descriptor.ServiceType == typeof(NBXplorerDashboard));
             Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(ExplorerClientProvider));
             Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IExplorerClientProvider));
             Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IFeeProviderFactory));
+            Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(FeeProviderFactory));
+            Assert.Contains(services, descriptor => IsScheduledTaskRegistrationFor<FeeProviderFactory>(services, descriptor));
             Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(FlorestaStatusMonitor));
             Assert.Contains(services, descriptor =>
                 descriptor.ServiceType == typeof(IHostedService) &&
                 descriptor.ImplementationFactory is not null);
             Assert.Contains(services, descriptor =>
+                descriptor.ServiceType == typeof(NBXplorerConnectionFactory));
+            Assert.DoesNotContain(services, descriptor =>
+                IsHostedServiceRegistrationFor<NBXplorerConnectionFactory>(services, descriptor));
+            Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(FlorestaNonBitcoinNbxplorerConnectionHostedService));
+            Assert.Contains(services, descriptor =>
+                IsHostedServiceRegistrationFor<FlorestaNonBitcoinNbxplorerConnectionHostedService>(services, descriptor));
+            Assert.Contains(services, descriptor =>
+                IsHostedServiceRegistrationFor<NBXplorerWaiters>(services, descriptor));
+            Assert.Contains(services, descriptor =>
                 IsHostedServiceRegistrationFor<FlorestaListener>(services, descriptor));
+            Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(FlorestaNonBitcoinSyncSummaryProvider));
+            Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(FlorestaOnChainWalletReportProvider));
+            Assert.Contains(services, descriptor =>
+                descriptor.ServiceType == typeof(ReportProvider) &&
+                descriptor.ImplementationFactory is not null);
+            Assert.Contains(services, descriptor =>
+                descriptor.ServiceType == typeof(WalletHistogramService) &&
+                descriptor.ImplementationType == typeof(FlorestaWalletHistogramService));
+            Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(FlorestaDbMigrationHostedService));
+            Assert.Contains(services, descriptor =>
+                IsHostedServiceRegistrationFor<FlorestaDbMigrationHostedService>(services, descriptor));
             Assert.Contains(services, descriptor =>
                 IsHostedServiceRegistrationFor<UnrelatedHostedService>(services, descriptor));
             Assert.Contains(services, descriptor =>
@@ -117,6 +144,9 @@ public class FlorestaPluginTests
         services.AddSingleton<IHostedService, NBXplorerWaiters>();
         services.AddSingleton<NBXplorerDashboard>();
         services.AddSingleton<ISyncSummaryProvider, NBXSyncSummaryProvider>();
+        services.AddSingleton<OnChainWalletReportProvider>();
+        services.AddSingleton<ReportProvider, OnChainWalletReportProvider>();
+        services.AddSingleton<WalletHistogramService>();
         services.AddSingleton<FeeProviderFactory>();
         services.AddTransient(_ => new ScheduledTask(typeof(FeeProviderFactory), TimeSpan.FromMinutes(3)));
         services.AddSingleton<IFeeProviderFactory, FeeProviderFactory>();

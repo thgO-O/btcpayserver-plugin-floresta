@@ -1,0 +1,21 @@
+@using BTCPayServer.Plugins.Floresta.Services
+@inject FlorestaNonBitcoinSyncSummaryProvider SyncProvider
+
+@foreach (var status in SyncProvider.GetStatuses().OfType<FlorestaNonBitcoinSyncStatus>())
+{
+    <h5 class="d-flex align-items-center fw-semibold">
+        <span class="me-2 btcpay-status btcpay-status--@(status.Available ? "enabled" : "disabled")"></span>
+        @status.PaymentMethodId
+    </h5>
+    <ul>
+        @if (status.Available)
+        {
+            <li>Connected to NBXplorer</li>
+            <li>Chain height: @status.ChainHeight</li>
+        }
+        else
+        {
+            <li>Disconnected from NBXplorer</li>
+        }
+    </ul>
+}

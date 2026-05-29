@@ -321,7 +321,12 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         {
             await page.GotoAsync(new Uri(_server.ServerUri, "/server/floresta").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
             await AssertNoUiError(page);
-            await Expect(page.Locator("#FlorestaHealthElectrumStatus")).ToContainTextAsync("Ready", new LocatorAssertionsToContainTextOptions { Timeout = 2_000 });
+            await page.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Test Connection" }).ClickAsync();
+            await Expect(page.GetByText(new Regex("Connection successful", RegexOptions.IgnoreCase))).ToBeVisibleAsync(new LocatorAssertionsToBeVisibleOptions
+            {
+                Timeout = 20_000
+            });
+            await Expect(page.Locator("#FlorestaHealthElectrumStatus")).ToContainTextAsync("Reachable", new LocatorAssertionsToContainTextOptions { Timeout = 2_000 });
             await Expect(page.Locator("#FlorestaHealthRpcStatus")).ToContainTextAsync("Reachable", new LocatorAssertionsToContainTextOptions { Timeout = 2_000 });
             await Expect(page.Locator("#FlorestaHealthIbd")).ToContainTextAsync("No", new LocatorAssertionsToContainTextOptions { Timeout = 2_000 });
 
@@ -454,7 +459,10 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await page.Locator("#ImportXpubLink").ClickAsync();
         await page.Locator("#DerivationScheme").FillAsync(WalletXpubBip84);
         await page.Locator("#Continue").ClickAsync();
-        await page.Locator("#Confirm").ClickAsync();
+        var confirm = page.Locator("#Confirm");
+        await Expect(confirm).ToBeVisibleAsync();
+        await confirm.EvaluateAsync("button => button.click()");
+        await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 30_000 });
         await Expect(page.Locator(".alert-success")).ToContainTextAsync("Wallet settings for BTC have been updated", new LocatorAssertionsToContainTextOptions { Timeout = 30_000 });
     }
 

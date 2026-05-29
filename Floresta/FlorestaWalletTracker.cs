@@ -2,9 +2,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Net.Http;
-using System.Text;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Plugins.Floresta.Data;
@@ -29,10 +26,10 @@ public class FlorestaWalletTracker
     private readonly SettingsRepository _settingsRepository;
     private readonly BTCPayNetworkProvider _networkProvider;
     private readonly ILogger<FlorestaWalletTracker> _logger;
-    private readonly SemaphoreSlim _lock = new(1, 1);
-    private readonly SemaphoreSlim _addressPoolLock = new(1, 1);
-    private readonly SemaphoreSlim _migrationLock = new(1, 1);
-    private bool _migrated;
+    private readonly FlorestaAddressPool _addressPool;
+    private readonly FlorestaUtxoCache _utxoCache;
+    private readonly FlorestaWalletSync _walletSync;
+    private readonly FlorestaTransactionBroadcaster _broadcaster;
 
     private readonly ConcurrentDictionary<string, DerivationStrategyBase> _trackedStrategies = new();
     private readonly ConcurrentDictionary<string, ScanUTXOInformation> _scanStates = new();
@@ -61,6 +58,23 @@ public class FlorestaWalletTracker
         _networkProvider = networkProvider;
         _logger = logger;
         ConfigureNetwork();
+        _addressPool = new FlorestaAddressPool(
+            _dbFactory,
+            _network,
+            ParseStrategy,
+            _ => GetSettingsAsync(),
+            _trackedStrategies);
+        _utxoCache = new FlorestaUtxoCache(_client, _network, _logger);
+        _walletSync = new FlorestaWalletSync(
+            _dbFactory,
+            _client,
+            _addressPool,
+            _utxoCache,
+            _trackedStrategies,
+            () => Volatile.Read(ref _tipHeight),
+            _network,
+            _logger);
+        _broadcaster = new FlorestaTransactionBroadcaster(_rpcClient, _client);
     }
 
     private void ConfigureNetwork()
@@ -74,47 +88,19 @@ public class FlorestaWalletTracker
         _derivationFactory = new DerivationStrategyFactory(_network);
     }
 
-    /// <summary>
-    /// Ensures DB migrations have run. Safe to call multiple times — only migrates once.
-    /// Does NOT require Electrum connection.
-    /// </summary>
-    private async Task EnsureMigratedAsync(CancellationToken ct)
-    {
-        if (_migrated) return;
-        await _migrationLock.WaitAsync(ct);
-        try
-        {
-            if (_migrated) return;
-            await using var ctx = _dbFactory.CreateContext();
-            await ctx.Database.MigrateAsync(ct);
-            _migrated = true;
-            _logger.LogInformation("Floresta plugin DB schema migrated");
-        }
-        finally
-        {
-            _migrationLock.Release();
-        }
-    }
-
     public void SetTipHeight(int height)
     {
-        _tipHeight = height;
+        Volatile.Write(ref _tipHeight, height);
     }
 
     public async Task InitializeAsync(CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
-
-        // Load wallets and their addresses from DB (fast, no Electrum calls)
         List<(string walletId, List<TrackedAddress> addresses)> walletsToSubscribe;
-        await _lock.WaitAsync(ct);
-        try
+        await using (var ctx = _dbFactory.CreateContext())
         {
-            await using var ctx = _dbFactory.CreateContext();
-
             var tipState = await ctx.SyncStates.FindAsync(new object[] { "tip_height" }, ct);
             if (tipState != null && int.TryParse(tipState.Value, out var savedTip))
-                _tipHeight = savedTip;
+                SetTipHeight(savedTip);
 
             var wallets = await ctx.TrackedWallets.ToListAsync(ct);
             walletsToSubscribe = new();
@@ -133,29 +119,13 @@ public class FlorestaWalletTracker
 
             _logger.LogInformation("Loaded {Count} tracked wallets from DB", wallets.Count);
         }
-        finally
-        {
-            _lock.Release();
-        }
 
-        // Subscribe to Electrum + sync state OUTSIDE the lock — these are slow network calls
         foreach (var (walletId, addresses) in walletsToSubscribe)
         {
-            foreach (var addr in addresses)
-            {
-                try
-                {
-                    await _client.ScripthashSubscribeAsync(addr.Scripthash, ct);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to subscribe scripthash {Scripthash}", addr.Scripthash);
-                }
-            }
-
             try
             {
-                await SyncWalletStateAsync(walletId, addresses, ct);
+                await _walletSync.SubscribeTrackedAddressesAsync(addresses, ct);
+                await _walletSync.SyncWalletStateAsync(walletId, addresses, ct);
             }
             catch (Exception ex)
             {
@@ -189,7 +159,7 @@ public class FlorestaWalletTracker
         await StartDescriptorRescanIfNeededAsync(settings, descriptorRegistration, ct);
 
         // Phase 1: derive addresses locally (fast, no network)
-        var addresses = await EnsureAddressesDerivedAsync(
+        var addresses = await _addressPool.EnsureAddressesDerivedAsync(
             strategyStr,
             settings,
             descriptorRegistration,
@@ -209,53 +179,13 @@ public class FlorestaWalletTracker
     {
         addresses ??= await GetTrackedAddressesAsync(strategyStr, ct);
 
-        // Phase 2: subscribe on Electrum + sync state (slow, needs network)
-        await _lock.WaitAsync(ct);
-        try
-        {
-            foreach (var addr in addresses)
-            {
-                await _client.ScripthashSubscribeAsync(addr.Scripthash, ct);
-            }
-
-            await SyncWalletStateAsync(strategyStr, addresses, ct);
-            _logger.LogInformation("Now tracking wallet {WalletId}", LogSafeId.Hash(strategyStr));
-        }
-        finally
-        {
-            _lock.Release();
-        }
-    }
-
-    private async Task SubscribeTrackedAddressesAsync(IEnumerable<TrackedAddress> addresses, CancellationToken ct)
-    {
-        if (!_client.IsConnected)
-            return;
-
-        var subscribed = new HashSet<string>();
-        foreach (var addr in addresses)
-        {
-            if (!subscribed.Add(addr.Scripthash))
-                continue;
-
-            try
-            {
-                await _client.ScripthashSubscribeAsync(addr.Scripthash, ct);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to subscribe scripthash {Scripthash}", addr.Scripthash);
-            }
-        }
+        await _walletSync.SubscribeTrackedAddressesAsync(addresses, ct);
+        await _walletSync.SyncWalletStateAsync(strategyStr, addresses, ct);
+        _logger.LogInformation("Now tracking wallet {WalletId}", LogSafeId.Hash(strategyStr));
     }
 
     private async Task<List<TrackedAddress>> GetTrackedAddressesAsync(string strategyStr, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
         await using var ctx = _dbFactory.CreateContext();
         return await ctx.TrackedAddresses
             .Where(a => a.WalletId == strategyStr)
@@ -299,93 +229,6 @@ public class FlorestaWalletTracker
             settings.DefaultRescanStartHeight);
     }
 
-    /// <summary>
-    /// Fast, local-only address derivation. Creates the wallet and derives
-    /// gap-limit addresses in the DB without any Electrum network calls.
-    /// Returns all currently tracked wallet addresses after filling missing ranges.
-    /// </summary>
-    private async Task<List<TrackedAddress>> EnsureAddressesDerivedAsync(
-        string strategyStr,
-        FlorestaSettings settings,
-        FlorestaDescriptorRegistrationResult descriptorRegistration,
-        DateTimeOffset? descriptorRegisteredAt,
-        string descriptorRegistrationError,
-        CancellationToken ct)
-    {
-        var strategy = ParseStrategy(strategyStr);
-        if (strategy == null)
-            throw new InvalidOperationException("Cannot parse derivation strategy.");
-
-        await EnsureMigratedAsync(ct);
-        await _addressPoolLock.WaitAsync(ct);
-        try
-        {
-            await using var ctx = _dbFactory.CreateContext();
-
-            var existing = await ctx.TrackedWallets.FindAsync(new object[] { strategyStr }, ct);
-            if (existing != null)
-            {
-                ApplyDescriptorMetadata(existing, descriptorRegistration, descriptorRegisteredAt, descriptorRegistrationError);
-
-                existing.ReceiveGapIndex = Math.Max(existing.ReceiveGapIndex, settings.GapLimit - 1);
-                existing.ChangeGapIndex = Math.Max(existing.ChangeGapIndex, settings.GapLimit - 1);
-
-                var existingHashes = await ctx.TrackedAddresses
-                    .Where(a => a.WalletId == strategyStr)
-                    .Select(a => a.Scripthash)
-                    .ToHashSetAsync(ct);
-
-                var addressesToAdd = DeriveAddresses(strategy, false, 0, existing.ReceiveGapIndex + 1)
-                    .Concat(DeriveAddresses(strategy, true, 0, existing.ChangeGapIndex + 1));
-                foreach (var addr in addressesToAdd)
-                {
-                    if (existingHashes.Contains(addr.Scripthash))
-                        continue;
-
-                    addr.WalletId = strategyStr;
-                    ctx.TrackedAddresses.Add(addr);
-                    existingHashes.Add(addr.Scripthash);
-                }
-
-                await ctx.SaveChangesAsync(ct);
-                _trackedStrategies[strategyStr] = strategy;
-                return await ctx.TrackedAddresses
-                    .Where(a => a.WalletId == strategyStr)
-                    .ToListAsync(ct);
-            }
-
-            var wallet = new TrackedWallet
-            {
-                Id = strategyStr,
-                CryptoCode = settings.CryptoCode ?? "BTC",
-                DerivationStrategy = strategyStr,
-                ReceiveGapIndex = settings.GapLimit - 1,
-                ChangeGapIndex = settings.GapLimit - 1
-            };
-            ApplyDescriptorMetadata(wallet, descriptorRegistration, descriptorRegisteredAt, descriptorRegistrationError);
-
-            ctx.TrackedWallets.Add(wallet);
-
-            var addresses = DeriveAddresses(strategy, false, 0, settings.GapLimit);
-            addresses.AddRange(DeriveAddresses(strategy, true, 0, settings.GapLimit));
-
-            foreach (var addr in addresses)
-            {
-                addr.WalletId = strategyStr;
-                ctx.TrackedAddresses.Add(addr);
-            }
-
-            await ctx.SaveChangesAsync(ct);
-            _trackedStrategies[strategyStr] = strategy;
-
-            return addresses;
-        }
-        finally
-        {
-            _addressPoolLock.Release();
-        }
-    }
-
     private async Task UpsertWalletDescriptorMetadataAsync(
         string strategyStr,
         FlorestaSettings settings,
@@ -394,189 +237,39 @@ public class FlorestaWalletTracker
         string descriptorRegistrationError,
         CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
-        await _lock.WaitAsync(ct);
-        try
+        await using var ctx = _dbFactory.CreateContext();
+        var wallet = await ctx.TrackedWallets.FindAsync(new object[] { strategyStr }, ct);
+        if (wallet == null)
         {
-            await using var ctx = _dbFactory.CreateContext();
-            var wallet = await ctx.TrackedWallets.FindAsync(new object[] { strategyStr }, ct);
-            if (wallet == null)
+            wallet = new TrackedWallet
             {
-                wallet = new TrackedWallet
-                {
-                    Id = strategyStr,
-                    CryptoCode = settings.CryptoCode ?? "BTC",
-                    DerivationStrategy = strategyStr,
-                    ReceiveGapIndex = settings.GapLimit - 1,
-                    ChangeGapIndex = settings.GapLimit - 1
-                };
-                ctx.TrackedWallets.Add(wallet);
-            }
+                Id = strategyStr,
+                CryptoCode = settings.CryptoCode ?? "BTC",
+                DerivationStrategy = strategyStr,
+                ReceiveGapIndex = settings.GapLimit - 1,
+                ChangeGapIndex = settings.GapLimit - 1
+            };
+            ctx.TrackedWallets.Add(wallet);
+        }
 
-            ApplyDescriptorMetadata(wallet, descriptorRegistration, descriptorRegisteredAt, descriptorRegistrationError);
-            await ctx.SaveChangesAsync(ct);
-        }
-        finally
-        {
-            _lock.Release();
-        }
-    }
-
-    private static void ApplyDescriptorMetadata(
-        TrackedWallet wallet,
-        FlorestaDescriptorRegistrationResult descriptorRegistration,
-        DateTimeOffset? descriptorRegisteredAt,
-        string descriptorRegistrationError)
-    {
-        if (descriptorRegistration.Descriptors is not null)
-        {
-            wallet.DescriptorHash = descriptorRegistration.Descriptors.DescriptorHash;
-            wallet.ReceiveDescriptor = descriptorRegistration.Descriptors.ReceiveDescriptor;
-            wallet.ChangeDescriptor = descriptorRegistration.Descriptors.ChangeDescriptor;
-        }
-        if (descriptorRegisteredAt is not null && wallet.DescriptorRegisteredAt is null)
-            wallet.DescriptorRegisteredAt = descriptorRegisteredAt;
-        wallet.DescriptorRegistrationError = descriptorRegistrationError;
+        FlorestaWalletDescriptorMetadata.Apply(
+            wallet,
+            descriptorRegistration,
+            descriptorRegisteredAt,
+            descriptorRegistrationError);
+        await ctx.SaveChangesAsync(ct);
     }
 
     public async Task<List<NewTransactionInfo>> HandleScripthashNotificationAsync(
         string scripthash, string status, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
-        var addressesToSubscribe = new List<TrackedAddress>();
-        var newTxs = new List<NewTransactionInfo>();
-        await _lock.WaitAsync(ct);
-        try
-        {
-            await using var ctx = _dbFactory.CreateContext();
-
-            var addr = await ctx.TrackedAddresses.FindAsync(new object[] { scripthash }, ct);
-            if (addr == null) return new List<NewTransactionInfo>();
-
-            var existingTxids = await ctx.Transactions
-                .Where(t => t.WalletId == addr.WalletId)
-                .Select(t => t.Txid)
-                .ToHashSetAsync(ct);
-
-            if (!_trackedStrategies.TryGetValue(addr.WalletId, out var strategy))
-                return new List<NewTransactionInfo>();
-
-            var walletAddresses = await ctx.TrackedAddresses
-                .Where(a => a.WalletId == addr.WalletId)
-                .ToDictionaryAsync(a => a.Scripthash, ct);
-            newTxs = await SyncAddressAsync(ctx, addr, strategy, walletAddresses, existingTxids, ct, addressesToSubscribe);
-
-            await ctx.SaveChangesAsync(ct);
-        }
-        finally
-        {
-            _lock.Release();
-        }
-
-        await SubscribeTrackedAddressesAsync(addressesToSubscribe, ct);
-        return newTxs;
+        return await _walletSync.HandleScripthashNotificationAsync(scripthash, ct);
     }
 
     public async Task<List<NewTransactionInfo>> HandleNewBlockAsync(int height, CancellationToken ct)
     {
-        var newTxs = new List<NewTransactionInfo>();
-        var addressesToSubscribe = new List<TrackedAddress>();
-        _tipHeight = height;
-
-        await EnsureMigratedAsync(ct);
-        await _lock.WaitAsync(ct);
-        try
-        {
-            await using var ctx = _dbFactory.CreateContext();
-
-            // Update sync state
-            var state = await ctx.SyncStates.FindAsync(new object[] { "tip_height" }, ct);
-            if (state != null)
-            {
-                state.Value = height.ToString();
-                state.UpdatedAt = DateTimeOffset.UtcNow;
-            }
-            else
-            {
-                ctx.SyncStates.Add(new SyncState
-                {
-                    Key = "tip_height",
-                    Value = height.ToString(),
-                    UpdatedAt = DateTimeOffset.UtcNow
-                });
-            }
-
-            // Re-check unconfirmed transactions
-            var unconfirmed = await ctx.Transactions
-                .Where(t => t.BlockHeight == null || t.BlockHeight == 0)
-                .ToListAsync(ct);
-
-            var addressesByWallet = await ctx.TrackedAddresses
-                .ToListAsync(ct);
-
-            foreach (var tx in unconfirmed)
-            {
-                var addresses = addressesByWallet
-                    .Where(a => a.WalletId == tx.WalletId);
-
-                foreach (var addr in addresses)
-                {
-                    var history = await _client.ScripthashGetHistoryAsync(addr.Scripthash, ct);
-                    var match = history.FirstOrDefault(h => h.TxHash == tx.Txid);
-                    if (match != null && match.Height > 0)
-                    {
-                        tx.BlockHeight = match.Height;
-                        break;
-                    }
-                }
-            }
-
-            // Update UTXO confirmations
-            var unconfirmedUtxos = await ctx.Utxos
-                .Where(u => u.BlockHeight == null || u.BlockHeight == 0)
-                .ToListAsync(ct);
-
-            foreach (var utxo in unconfirmedUtxos)
-            {
-                var addr = await ctx.TrackedAddresses.FindAsync(new object[] { utxo.Scripthash }, ct);
-                if (addr == null) continue;
-
-                var utxoList = await _client.ScripthashListUnspentAsync(addr.Scripthash, ct);
-                var match = utxoList.FirstOrDefault(u =>
-                    u.TxHash == utxo.Txid && u.TxPos == utxo.Vout);
-
-                if (match != null && match.Height > 0)
-                {
-                    utxo.BlockHeight = match.Height;
-                }
-            }
-
-            foreach (var walletGroup in addressesByWallet.GroupBy(a => a.WalletId))
-            {
-                if (!_trackedStrategies.TryGetValue(walletGroup.Key, out var strategy))
-                    continue;
-
-                var walletAddresses = walletGroup.ToDictionary(a => a.Scripthash);
-                var existingTxids = await ctx.Transactions
-                    .Where(t => t.WalletId == walletGroup.Key)
-                    .Select(t => t.Txid)
-                    .ToHashSetAsync(ct);
-
-                foreach (var addr in walletGroup)
-                {
-                    newTxs.AddRange(await SyncAddressAsync(ctx, addr, strategy, walletAddresses, existingTxids, ct, addressesToSubscribe));
-                }
-            }
-
-            await ctx.SaveChangesAsync(ct);
-        }
-        finally
-        {
-            _lock.Release();
-        }
-
-        await SubscribeTrackedAddressesAsync(addressesToSubscribe, ct);
-        return newTxs;
+        var tipHeight = UpdateTipHeight(height);
+        return await _walletSync.HandleNewBlockAsync(tipHeight, ct);
     }
 
     // ─────────────────────────────────────────────
@@ -586,97 +279,25 @@ public class FlorestaWalletTracker
     public async Task<KeyPathInformation> GetNextUnusedAddressAsync(
         string strategyStr, bool isChange, bool reserve, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
-        var addressesToSubscribe = new List<TrackedAddress>();
-
-        await using (var readCtx = _dbFactory.CreateContext())
-        {
-            var existingAddress = await GetFirstAvailableAddressAsync(readCtx, strategyStr, isChange, ct);
-            if (existingAddress == null)
-            {
-                // Derive the initial wallet range outside the reservation lock. If the
-                // wallet already exists this is idempotent and only fills missing rows.
-                var settings = await GetSettingsAsync();
-                var descriptorRegistration = new FlorestaDescriptorRegistrationResult(
-                    _descriptorService.CreateDescriptors(settings.CryptoCode ?? "BTC", strategyStr),
-                    0,
-                    0,
-                    null);
-                addressesToSubscribe.AddRange(await EnsureAddressesDerivedAsync(
-                    strategyStr,
-                    settings,
-                    descriptorRegistration,
-                    null,
-                    null,
-                    ct));
-            }
-        }
-
-        KeyPathInformation result = null;
-        await _addressPoolLock.WaitAsync(ct);
-        try
-        {
-            await using var ctx = _dbFactory.CreateContext();
-            var addr = await GetFirstAvailableAddressAsync(ctx, strategyStr, isChange, ct);
-            if (addr == null)
-            {
-                var settings = await GetSettingsAsync();
-                addressesToSubscribe.AddRange(await ExtendAddressPoolAsync(ctx, strategyStr, isChange, settings, ct));
-                addr = await GetFirstAvailableAddressAsync(ctx, strategyStr, isChange, ct);
-            }
-
-            if (addr != null)
-            {
-                if (reserve)
-                {
-                    addr.IsReserved = true;
-                    addressesToSubscribe.AddRange(await ExtendGapIfNeededCore(ctx, addr, ct));
-                    await ctx.SaveChangesAsync(ct);
-                }
-
-                var script = Script.FromBytesUnsafe(addr.ScriptPubKey);
-                var address = script.GetDestinationAddress(_network);
-
-                result = new KeyPathInformation
-                {
-                    Address = address,
-                    ScriptPubKey = script,
-                    KeyPath = KeyPath.Parse(addr.KeyPath),
-                    Feature = isChange ? DerivationFeature.Change : DerivationFeature.Deposit,
-                    TrackedSource = TrackedSource.Create(ParseStrategy(strategyStr))
-                };
-            }
-        }
-        finally
-        {
-            _addressPoolLock.Release();
-        }
-
-        await SubscribeTrackedAddressesAsync(addressesToSubscribe, ct);
-        return result;
-    }
-
-    private static async Task<TrackedAddress> GetFirstAvailableAddressAsync(
-        FlorestaDbContext ctx,
-        string strategyStr,
-        bool isChange,
-        CancellationToken ct)
-    {
-        var candidates = await ctx.TrackedAddresses
-            .Where(a => a.WalletId == strategyStr &&
-                        a.IsChange == isChange &&
-                        !a.IsReserved &&
-                        !a.IsUsed)
-            .ToListAsync(ct);
-
-        return candidates
-            .OrderBy(TrackedAddressReservationPolicy.GetKeyIndexOrMax)
-            .FirstOrDefault();
+        var settings = await GetSettingsAsync();
+        var descriptorRegistration = new FlorestaDescriptorRegistrationResult(
+            _descriptorService.CreateDescriptors(settings.CryptoCode ?? "BTC", strategyStr),
+            0,
+            0,
+            null);
+        var reservation = await _addressPool.GetNextUnusedAddressAsync(
+            strategyStr,
+            isChange,
+            reserve,
+            settings,
+            descriptorRegistration,
+            ct);
+        await _walletSync.SubscribeTrackedAddressesAsync(reservation.AddressesToSubscribe, ct);
+        return reservation.Address;
     }
 
     public async Task<UTXOChanges> GetUTXOChangesAsync(string strategyStr, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
         await using var ctx = _dbFactory.CreateContext();
 
         var utxos = await ctx.Utxos
@@ -685,9 +306,11 @@ public class FlorestaWalletTracker
 
         var confirmed = new List<UTXO>();
         var unconfirmed = new List<UTXO>();
+        var tipHeight = Volatile.Read(ref _tipHeight);
 
         foreach (var u in utxos)
         {
+            var confirmations = GetConfirmations(u.BlockHeight, tipHeight);
             var utxo = new UTXO
             {
                 Outpoint = OutPoint.Parse(u.Outpoint),
@@ -695,12 +318,10 @@ public class FlorestaWalletTracker
                 ScriptPubKey = Script.FromBytesUnsafe(u.ScriptPubKey),
                 KeyPath = KeyPath.Parse(u.KeyPath),
                 Timestamp = u.SeenAt,
-                Confirmations = u.BlockHeight.HasValue && _tipHeight > 0
-                    ? _tipHeight - (int)u.BlockHeight.Value + 1
-                    : 0
+                Confirmations = confirmations
             };
 
-            if (u.BlockHeight.HasValue && u.BlockHeight > 0)
+            if (confirmations > 0)
                 confirmed.Add(utxo);
             else
                 unconfirmed.Add(utxo);
@@ -708,7 +329,7 @@ public class FlorestaWalletTracker
 
         var result = new UTXOChanges
         {
-            CurrentHeight = _tipHeight,
+            CurrentHeight = tipHeight,
             Confirmed = new UTXOChange { UTXOs = confirmed },
             Unconfirmed = new UTXOChange { UTXOs = unconfirmed }
         };
@@ -718,15 +339,15 @@ public class FlorestaWalletTracker
 
     public async Task<GetBalanceResponse> GetBalanceAsync(string strategyStr, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
         await using var ctx = _dbFactory.CreateContext();
 
         var utxos = await ctx.Utxos
             .Where(u => u.WalletId == strategyStr && !u.IsSpent)
             .ToListAsync(ct);
 
-        var confirmed = utxos.Where(u => u.BlockHeight.HasValue && u.BlockHeight > 0).Sum(u => u.Value);
-        var unconfirmed = utxos.Where(u => !u.BlockHeight.HasValue || u.BlockHeight <= 0).Sum(u => u.Value);
+        var tipHeight = Volatile.Read(ref _tipHeight);
+        var confirmed = utxos.Where(u => GetConfirmations(u.BlockHeight, tipHeight) > 0).Sum(u => u.Value);
+        var unconfirmed = utxos.Where(u => GetConfirmations(u.BlockHeight, tipHeight) == 0).Sum(u => u.Value);
 
         return new GetBalanceResponse
         {
@@ -739,9 +360,7 @@ public class FlorestaWalletTracker
 
     public async Task WipeAsync(string strategyStr, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
-        await _lock.WaitAsync(ct);
-        try
+        await _walletSync.RunWithWalletLockAsync(strategyStr, async () =>
         {
             await using var ctx = _dbFactory.CreateContext();
             var utxos = await ctx.Utxos
@@ -759,16 +378,11 @@ public class FlorestaWalletTracker
                 LogSafeId.Hash(strategyStr),
                 utxos.Count,
                 transactions.Count);
-        }
-        finally
-        {
-            _lock.Release();
-        }
+        }, ct);
     }
 
     public async Task<TransactionResult> GetTransactionResultAsync(string txId, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
         await using var ctx = _dbFactory.CreateContext();
 
         var tx = await ctx.Transactions
@@ -796,16 +410,14 @@ public class FlorestaWalletTracker
         }
 
         var transaction = tx.RawTx != null ? Transaction.Load(tx.RawTx, _network) : null;
-        var confirmations = tx.BlockHeight.HasValue && tx.BlockHeight > 0 && _tipHeight > 0
-            ? _tipHeight - (int)tx.BlockHeight.Value + 1
-            : 0;
+        var confirmations = GetConfirmations(tx.BlockHeight, Volatile.Read(ref _tipHeight));
 
         return new TransactionResult
         {
             TransactionHash = uint256.Parse(tx.Txid),
             Transaction = transaction,
             Confirmations = confirmations,
-            Height = tx.BlockHeight.HasValue ? (int)tx.BlockHeight.Value : 0,
+            Height = GetConfirmedHeight(tx.BlockHeight, confirmations),
             Timestamp = tx.SeenAt
         };
     }
@@ -813,7 +425,6 @@ public class FlorestaWalletTracker
     public async Task<TransactionInformation> GetTransactionInfoAsync(
         string strategyStr, string txId, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
         await using var ctx = _dbFactory.CreateContext();
 
         var tx = await ctx.Transactions
@@ -822,16 +433,14 @@ public class FlorestaWalletTracker
         if (tx == null) return null;
 
         var transaction = tx.RawTx != null ? Transaction.Load(tx.RawTx, _network) : null;
-        var confirmations = tx.BlockHeight.HasValue && tx.BlockHeight > 0 && _tipHeight > 0
-            ? _tipHeight - (int)tx.BlockHeight.Value + 1
-            : 0;
+        var confirmations = GetConfirmations(tx.BlockHeight, Volatile.Read(ref _tipHeight));
 
         return new TransactionInformation
         {
             TransactionId = uint256.Parse(tx.Txid),
             Transaction = transaction,
             Confirmations = confirmations,
-            Height = tx.BlockHeight.HasValue ? (int)tx.BlockHeight.Value : 0,
+            Height = GetConfirmedHeight(tx.BlockHeight, confirmations),
             Timestamp = tx.SeenAt,
             BalanceChange = Money.Satoshis(tx.BalanceChange)
         };
@@ -840,7 +449,6 @@ public class FlorestaWalletTracker
     public async Task<GetTransactionsResponse> GetTransactionsResponseAsync(
         string strategyStr, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
         await using var ctx = _dbFactory.CreateContext();
 
         var txs = await ctx.Transactions
@@ -850,25 +458,24 @@ public class FlorestaWalletTracker
 
         var confirmed = new List<TransactionInformation>();
         var unconfirmed = new List<TransactionInformation>();
+        var tipHeight = Volatile.Read(ref _tipHeight);
 
         foreach (var tx in txs)
         {
             var transaction = tx.RawTx != null ? Transaction.Load(tx.RawTx, _network) : null;
-            var confirmations = tx.BlockHeight.HasValue && tx.BlockHeight > 0 && _tipHeight > 0
-                ? _tipHeight - (int)tx.BlockHeight.Value + 1
-                : 0;
+            var confirmations = GetConfirmations(tx.BlockHeight, tipHeight);
 
             var info = new TransactionInformation
             {
                 TransactionId = uint256.Parse(tx.Txid),
                 Transaction = transaction,
                 Confirmations = confirmations,
-                Height = tx.BlockHeight.HasValue ? (int)tx.BlockHeight.Value : 0,
+                Height = GetConfirmedHeight(tx.BlockHeight, confirmations),
                 Timestamp = tx.SeenAt,
                 BalanceChange = Money.Satoshis(tx.BalanceChange)
             };
 
-            if (tx.BlockHeight.HasValue && tx.BlockHeight > 0)
+            if (confirmations > 0)
                 confirmed.Add(info);
             else
                 unconfirmed.Add(info);
@@ -876,7 +483,7 @@ public class FlorestaWalletTracker
 
         return new GetTransactionsResponse
         {
-            Height = _tipHeight,
+            Height = tipHeight,
             ConfirmedTransactions = new TransactionInformationSet { Transactions = confirmed },
             UnconfirmedTransactions = new TransactionInformationSet { Transactions = unconfirmed },
             ReplacedTransactions = new TransactionInformationSet { Transactions = new List<TransactionInformation>() }
@@ -885,147 +492,22 @@ public class FlorestaWalletTracker
 
     public async Task<BroadcastResult> BroadcastAsync(string body, CancellationToken ct)
     {
-        return await BroadcastAsync(Encoding.UTF8.GetBytes(body), ct);
+        return await _broadcaster.BroadcastAsync(body, ct);
     }
 
     public async Task<BroadcastResult> BroadcastAsync(byte[] body, CancellationToken ct)
     {
-        if (!TryExtractRawTransactionHex(body, out var rawTx, out var parseError))
-        {
-            return new BroadcastResult(false)
-            {
-                RPCMessage = parseError
-            };
-        }
-
-        try
-        {
-            await _rpcClient.SendRawTransactionAsync(rawTx, ct);
-            return new BroadcastResult(true);
-        }
-        catch (Exception rpcEx) when (rpcEx is FlorestaRpcException or InvalidOperationException or HttpRequestException)
-        {
-            try
-            {
-                await _client.TransactionBroadcastAsync(rawTx, ct);
-                return new BroadcastResult(true);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return new BroadcastResult(false)
-                {
-                    RPCMessage = $"RPC broadcast failed: {rpcEx.Message}; Electrum broadcast failed: {ex.Message}"
-                };
-            }
-        }
-        catch (FlorestaElectrumException ex)
-        {
-            return new BroadcastResult(false)
-            {
-                RPCMessage = ex.Message
-            };
-        }
+        return await _broadcaster.BroadcastAsync(body, ct);
     }
 
     internal static bool TryExtractRawTransactionHex(string body, out string rawTx, out string error)
     {
-        return TryExtractRawTransactionHex(Encoding.UTF8.GetBytes(body), out rawTx, out error);
+        return FlorestaTransactionBroadcaster.TryExtractRawTransactionHex(body, out rawTx, out error);
     }
 
     internal static bool TryExtractRawTransactionHex(byte[] body, out string rawTx, out string error)
     {
-        rawTx = string.Empty;
-        error = string.Empty;
-
-        if (body.Length == 0)
-        {
-            error = "Broadcast request body is empty.";
-            return false;
-        }
-
-        var bodyText = Encoding.UTF8.GetString(body);
-        var trimmed = bodyText.Trim();
-        try
-        {
-            using var doc = JsonDocument.Parse(trimmed);
-            if (TryExtractRawTransactionHex(doc.RootElement, out rawTx))
-                return true;
-        }
-        catch (JsonException)
-        {
-            if (TryNormalizeRawTransactionHex(trimmed.Trim('"'), out rawTx))
-                return true;
-        }
-
-        if (!LooksLikeText(body))
-        {
-            rawTx = Convert.ToHexString(body).ToLowerInvariant();
-            return true;
-        }
-
-        error = "Broadcast request did not contain raw transaction hex.";
-        return false;
-    }
-
-    private static bool TryExtractRawTransactionHex(JsonElement element, out string rawTx)
-    {
-        rawTx = string.Empty;
-
-        if (element.ValueKind == JsonValueKind.String)
-            return TryNormalizeRawTransactionHex(element.GetString(), out rawTx);
-
-        if (element.ValueKind != JsonValueKind.Object)
-            return false;
-
-        foreach (var propertyName in new[] { "transaction", "hex", "rawTransaction", "rawTx" })
-        {
-            if (TryGetPropertyIgnoreCase(element, propertyName, out var property) &&
-                TryExtractRawTransactionHex(property, out rawTx))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool TryGetPropertyIgnoreCase(JsonElement element, string propertyName, out JsonElement property)
-    {
-        foreach (var candidate in element.EnumerateObject())
-        {
-            if (string.Equals(candidate.Name, propertyName, StringComparison.OrdinalIgnoreCase))
-            {
-                property = candidate.Value;
-                return true;
-            }
-        }
-
-        property = default;
-        return false;
-    }
-
-    private static bool LooksLikeText(byte[] bytes)
-    {
-        foreach (var b in bytes)
-        {
-            if (b is 9 or 10 or 13)
-                continue;
-            if (b < 32)
-                return false;
-        }
-
-        return true;
-    }
-
-    private static bool TryNormalizeRawTransactionHex(string value, out string rawTx)
-    {
-        rawTx = (value ?? string.Empty).Trim();
-        if (rawTx.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-            rawTx = rawTx[2..];
-
-        return rawTx.Length > 0 &&
-               rawTx.Length % 2 == 0 &&
-               rawTx.All(Uri.IsHexDigit);
+        return FlorestaTransactionBroadcaster.TryExtractRawTransactionHex(body, out rawTx, out error);
     }
 
     public async Task<GetFeeRateResult> GetFeeRateAsync(int blockTarget, CancellationToken ct)
@@ -1034,35 +516,6 @@ public class FlorestaWalletTracker
         {
             FeeRate = await _feeProvider.GetFeeRateAsync(blockTarget),
             BlockCount = blockTarget
-        };
-    }
-
-    public StatusResult GetStatus()
-    {
-        return new StatusResult
-        {
-            IsFullySynched = _client.IsConnected,
-            ChainHeight = _tipHeight,
-            SyncHeight = _tipHeight,
-            Version = $"floresta-plugin-{typeof(FlorestaPlugin).Assembly.GetName().Version?.ToString() ?? "unknown"}",
-            SupportedCryptoCodes = new[] { "BTC" },
-            NetworkType = _network?.ChainName ?? ChainName.Mainnet,
-            BitcoinStatus = new BitcoinStatus
-            {
-                Blocks = _tipHeight,
-                Headers = _tipHeight,
-                VerificationProgress = 1.0,
-                IsSynched = _client.IsConnected,
-                MinRelayTxFee = new FeeRate(1.0m),
-                IncrementalRelayFee = new FeeRate(1.0m),
-                Capabilities = new NodeCapabilities
-                {
-                    CanScanTxoutSet = true,
-                    CanSupportSegwit = true,
-                    CanSupportTaproot = true,
-                    CanSupportTransactionCheck = true
-                }
-            }
         };
     }
 
@@ -1116,11 +569,6 @@ public class FlorestaWalletTracker
         string strategyStr, int gapLimit, int startingIndex,
         ScanUTXOInformation scanInfo, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
-
-        var strategy = ParseStrategy(strategyStr);
-        if (strategy == null)
-            throw new InvalidOperationException("Cannot parse derivation strategy.");
         var settings = await GetSettingsAsync();
         var descriptorRegistration = await PrepareDescriptorRegistrationAsync(strategyStr, settings, ct);
         if (!descriptorRegistration.Succeeded)
@@ -1135,72 +583,15 @@ public class FlorestaWalletTracker
             : (DateTimeOffset?)null;
         await StartDescriptorRescanIfNeededAsync(settings, descriptorRegistration, ct);
 
-        await _addressPoolLock.WaitAsync(ct);
-        List<TrackedAddress> newAddresses;
-        try
-        {
-            await using var ctx = _dbFactory.CreateContext();
-
-            var wallet = await ctx.TrackedWallets.FindAsync(new object[] { strategyStr }, ct);
-            if (wallet == null)
-            {
-                wallet = new TrackedWallet
-                {
-                    Id = strategyStr,
-                    CryptoCode = settings.CryptoCode ?? "BTC",
-                    DerivationStrategy = strategyStr,
-                    ReceiveGapIndex = startingIndex + gapLimit - 1,
-                    ChangeGapIndex = startingIndex + gapLimit - 1
-                };
-                ApplyDescriptorMetadata(wallet, descriptorRegistration, descriptorRegisteredAt, null);
-                ctx.TrackedWallets.Add(wallet);
-            }
-            else
-            {
-                wallet.ReceiveGapIndex = Math.Max(wallet.ReceiveGapIndex, startingIndex + gapLimit - 1);
-                wallet.ChangeGapIndex = Math.Max(wallet.ChangeGapIndex, startingIndex + gapLimit - 1);
-                ApplyDescriptorMetadata(wallet, descriptorRegistration, descriptorRegisteredAt, null);
-            }
-
-            var existingHashes = await ctx.TrackedAddresses
-                .Where(a => a.WalletId == strategyStr)
-                .Select(a => a.Scripthash)
-                .ToHashSetAsync(ct);
-
-            var receiveAddrs = DeriveAddresses(strategy, false, startingIndex, gapLimit);
-            var changeAddrs = DeriveAddresses(strategy, true, startingIndex, gapLimit);
-            newAddresses = new List<TrackedAddress>();
-
-            foreach (var addr in receiveAddrs.Concat(changeAddrs))
-            {
-                if (!existingHashes.Contains(addr.Scripthash))
-                {
-                    addr.WalletId = strategyStr;
-                    ctx.TrackedAddresses.Add(addr);
-                    newAddresses.Add(addr);
-                }
-            }
-
-            await ctx.SaveChangesAsync(ct);
-            _trackedStrategies[strategyStr] = strategy;
-        }
-        finally
-        {
-            _addressPoolLock.Release();
-        }
-
-        foreach (var addr in newAddresses)
-        {
-            try
-            {
-                if (_client.IsConnected)
-                    await _client.ScripthashSubscribeAsync(addr.Scripthash, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to subscribe {Scripthash} during scan", addr.Scripthash);
-            }
-        }
+        var newAddresses = await _addressPool.EnsureScanAddressesAsync(
+            strategyStr,
+            settings,
+            descriptorRegistration,
+            descriptorRegisteredAt,
+            startingIndex,
+            gapLimit,
+            ct);
+        await _walletSync.SubscribeTrackedAddressesAsync(newAddresses, ct);
 
         var allAddresses = new List<TrackedAddress>();
         await using (var ctx = _dbFactory.CreateContext())
@@ -1214,7 +605,7 @@ public class FlorestaWalletTracker
 
         if (_client.IsConnected)
         {
-            await SyncWalletStateAsync(
+            await _walletSync.SyncWalletStateAsync(
                 strategyStr,
                 allAddresses,
                 ct,
@@ -1243,7 +634,6 @@ public class FlorestaWalletTracker
 
     public async Task SetMetadataAsync(string derivationScheme, string key, string value, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
         await using var ctx = _dbFactory.CreateContext();
         var metaKey = $"metadata:{derivationScheme}:{key}";
         var existing = await ctx.SyncStates.FindAsync(new object[] { metaKey }, ct);
@@ -1266,7 +656,6 @@ public class FlorestaWalletTracker
 
     public async Task<string> GetMetadataAsync(string derivationScheme, string key, CancellationToken ct)
     {
-        await EnsureMigratedAsync(ct);
         await using var ctx = _dbFactory.CreateContext();
         var metaKey = $"metadata:{derivationScheme}:{key}";
         var state = await ctx.SyncStates.FindAsync(new object[] { metaKey }, ct);
@@ -1291,237 +680,30 @@ public class FlorestaWalletTracker
         }
     }
 
-    private List<TrackedAddress> DeriveAddresses(
-        DerivationStrategyBase strategy, bool isChange, int fromIndex, int count)
+    private int UpdateTipHeight(int height)
     {
-        var result = new List<TrackedAddress>();
-        var feature = isChange ? DerivationFeature.Change : DerivationFeature.Deposit;
-        var line = strategy.GetLineFor(feature);
-
-        for (var i = fromIndex; i < fromIndex + count; i++)
+        while (true)
         {
-            var derivation = line.Derive((uint)i);
-            var script = derivation.ScriptPubKey;
-            var scripthash = ScriptHashUtility.ComputeScriptHash(script);
-            var address = script.GetDestinationAddress(_network);
+            var current = Volatile.Read(ref _tipHeight);
+            if (height <= current)
+                return current;
 
-            var chainIndex = isChange ? 1 : 0;
-            result.Add(new TrackedAddress
-            {
-                Scripthash = scripthash,
-                KeyPath = $"{chainIndex}/{i}",
-                ScriptPubKey = script.ToBytes(),
-                Address = address?.ToString() ?? "",
-                IsChange = isChange,
-                IsReserved = false,
-                IsUsed = false
-            });
+            if (Interlocked.CompareExchange(ref _tipHeight, height, current) == current)
+                return height;
         }
-
-        return result;
     }
 
-    private async Task SyncWalletStateAsync(
-        string walletId,
-        List<TrackedAddress> addresses,
-        CancellationToken ct,
-        Action<int, int> reportProgress = null)
+    internal static int GetConfirmations(long? blockHeight, int tipHeight)
     {
-        await using var ctx = _dbFactory.CreateContext();
-        var addressesToSubscribe = new List<TrackedAddress>();
-        var existingTxids = await ctx.Transactions
-            .Where(t => t.WalletId == walletId)
-            .Select(t => t.Txid)
-            .ToHashSetAsync(ct);
+        if (blockHeight is not > 0 || tipHeight <= 0)
+            return 0;
 
-        if (!_trackedStrategies.TryGetValue(walletId, out var strategy))
-            return;
-
-        var walletAddresses = await ctx.TrackedAddresses
-            .Where(a => a.WalletId == walletId)
-            .ToDictionaryAsync(a => a.Scripthash, ct);
-
-        var processed = 0;
-        foreach (var addr in addresses)
-        {
-            try
-            {
-                if (walletAddresses.TryGetValue(addr.Scripthash, out var trackedAddress))
-                    await SyncAddressAsync(ctx, trackedAddress, strategy, walletAddresses, existingTxids, ct, addressesToSubscribe);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error syncing address {Address} ({Scripthash})",
-                    addr.Address, addr.Scripthash);
-            }
-            finally
-            {
-                processed++;
-                reportProgress?.Invoke(processed, addresses.Count);
-            }
-        }
-
-        await ctx.SaveChangesAsync(ct);
-        await SubscribeTrackedAddressesAsync(addressesToSubscribe, ct);
+        return Math.Max(0, tipHeight - (int)blockHeight.Value + 1);
     }
 
-    private async Task<List<NewTransactionInfo>> SyncAddressAsync(
-        FlorestaDbContext ctx,
-        TrackedAddress addr,
-        DerivationStrategyBase strategy,
-        IReadOnlyDictionary<string, TrackedAddress> walletAddresses,
-        HashSet<string> existingTxids,
-        CancellationToken ct,
-        List<TrackedAddress> addressesToSubscribe = null)
+    internal static int GetConfirmedHeight(long? blockHeight, int confirmations)
     {
-        var newTxs = new List<NewTransactionInfo>();
-        var history = await _client.ScripthashGetHistoryAsync(addr.Scripthash, ct);
-
-        foreach (var item in history)
-        {
-            if (existingTxids.Contains(item.TxHash))
-            {
-                var existing = await ctx.Transactions
-                    .FirstOrDefaultAsync(t => t.Txid == item.TxHash && t.WalletId == addr.WalletId, ct);
-                if (existing != null && item.Height > 0 && existing.BlockHeight != item.Height)
-                    existing.BlockHeight = item.Height;
-                continue;
-            }
-
-            var rawHex = await _client.TransactionGetAsync(item.TxHash, ct);
-            var tx = Transaction.Parse(rawHex, _network);
-            var balanceChange = ComputeBalanceChange(ctx, tx, addr.WalletId);
-
-            ctx.Transactions.Add(new TrackedTransaction
-            {
-                Txid = item.TxHash,
-                WalletId = addr.WalletId,
-                RawTx = tx.ToBytes(),
-                BlockHeight = item.Height > 0 ? item.Height : null,
-                Fee = item.Fee > 0 ? item.Fee : null,
-                BalanceChange = balanceChange,
-                SeenAt = DateTimeOffset.UtcNow
-            });
-            existingTxids.Add(item.TxHash);
-
-            var txInfo = BuildNewTransactionInfo(tx, strategy, item, walletAddresses);
-            if (txInfo != null)
-                newTxs.Add(txInfo);
-        }
-
-        var utxos = await GetReconciledUtxosAsync(addr, ct);
-        await UpdateUtxosForAddress(ctx, addr, utxos, ct);
-
-        if (history.Length > 0 && !addr.IsUsed)
-        {
-            addr.IsUsed = true;
-            var newAddresses = await ExtendGapIfNeeded(ctx, addr, ct);
-            addressesToSubscribe?.AddRange(newAddresses);
-        }
-
-        return newTxs;
-    }
-
-    private async Task<FlorestaElectrumUnspentItem[]> GetReconciledUtxosAsync(
-        TrackedAddress addr,
-        CancellationToken ct)
-    {
-        var utxos = await _client.ScripthashListUnspentAsync(addr.Scripthash, ct);
-        utxos = await NormalizeUtxosAsync(addr, utxos, ct);
-
-        try
-        {
-            // This is a diagnostic consistency check, not the operational UTXO source.
-            // If address sync or scans become too slow, gate this behind a setting/env
-            // or run it only during manual scan/recovery flows.
-            var balance = await _client.ScripthashGetBalanceAsync(addr.Scripthash, ct);
-            if (!BalanceMatchesListUnspent(balance, utxos))
-            {
-                _logger.LogWarning(
-                    "Electrum balance mismatch for wallet {WalletId} scripthash {Scripthash}; retrying once",
-                    LogSafeId.Hash(addr.WalletId),
-                    addr.Scripthash);
-
-                utxos = await _client.ScripthashListUnspentAsync(addr.Scripthash, ct);
-                utxos = await NormalizeUtxosAsync(addr, utxos, ct);
-                balance = await _client.ScripthashGetBalanceAsync(addr.Scripthash, ct);
-
-                if (!BalanceMatchesListUnspent(balance, utxos))
-                {
-                    _logger.LogWarning(
-                        "Electrum balance still mismatched for wallet {WalletId} scripthash {Scripthash}; keeping listunspent as UTXO source",
-                        LogSafeId.Hash(addr.WalletId),
-                        addr.Scripthash);
-                }
-            }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(
-                ex,
-                "Could not reconcile Electrum balance for wallet {WalletId} scripthash {Scripthash}; keeping listunspent as UTXO source",
-                LogSafeId.Hash(addr.WalletId),
-                addr.Scripthash);
-        }
-
-        return utxos;
-    }
-
-    private async Task<FlorestaElectrumUnspentItem[]> NormalizeUtxosAsync(
-        TrackedAddress addr,
-        FlorestaElectrumUnspentItem[] utxos,
-        CancellationToken ct)
-    {
-        if (utxos.Length == 0)
-            return utxos;
-
-        var scriptPubKey = addr.ScriptPubKey;
-        var normalized = new List<FlorestaElectrumUnspentItem>(utxos.Length);
-
-        foreach (var utxo in utxos)
-        {
-            var normalizedUtxo = utxo;
-            try
-            {
-                var rawHex = await _client.TransactionGetAsync(utxo.TxHash, ct);
-                var tx = Transaction.Parse(rawHex, _network);
-                normalizedUtxo = NormalizeUtxoPosition(utxo, tx, scriptPubKey);
-                if (normalizedUtxo.TxPos != utxo.TxPos)
-                {
-                    _logger.LogDebug(
-                        "Corrected Electrum UTXO position for wallet {WalletId}: {TxId}:{OldVout} -> {TxId}:{NewVout}",
-                        LogSafeId.Hash(addr.WalletId),
-                        utxo.TxHash,
-                        utxo.TxPos,
-                        utxo.TxHash,
-                        normalizedUtxo.TxPos);
-                }
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(
-                    ex,
-                    "Could not verify Electrum UTXO position for wallet {WalletId} outpoint {TxId}:{Vout}",
-                    LogSafeId.Hash(addr.WalletId),
-                    utxo.TxHash,
-                    utxo.TxPos);
-            }
-
-            normalized.Add(normalizedUtxo);
-        }
-
-        return normalized
-            .GroupBy(u => $"{u.TxHash}:{u.TxPos}")
-            .Select(g => g.First())
-            .ToArray();
+        return confirmations > 0 && blockHeight is > 0 ? (int)blockHeight.Value : 0;
     }
 
     internal static FlorestaElectrumUnspentItem NormalizeUtxoPosition(
@@ -1529,281 +711,7 @@ public class FlorestaWalletTracker
         Transaction tx,
         byte[] scriptPubKey)
     {
-        var txPosMatches = utxo.TxPos >= 0 &&
-                           utxo.TxPos < tx.Outputs.Count &&
-                           tx.Outputs[utxo.TxPos].ScriptPubKey.ToBytes().SequenceEqual(scriptPubKey);
-
-        if (txPosMatches)
-        {
-            var output = tx.Outputs[utxo.TxPos];
-            if (output.Value.Satoshi == utxo.Value)
-                return utxo;
-
-            var sameScriptSameValueIndex = Enumerable.Range(0, tx.Outputs.Count)
-                .Cast<int?>()
-                .FirstOrDefault(i =>
-                    i.Value != utxo.TxPos &&
-                    tx.Outputs[i.Value].Value.Satoshi == utxo.Value &&
-                    tx.Outputs[i.Value].ScriptPubKey.ToBytes().SequenceEqual(scriptPubKey));
-            if (sameScriptSameValueIndex is int matchingIndex)
-            {
-                return new FlorestaElectrumUnspentItem
-                {
-                    TxHash = utxo.TxHash,
-                    TxPos = matchingIndex,
-                    Value = utxo.Value,
-                    Height = utxo.Height
-                };
-            }
-
-            return new FlorestaElectrumUnspentItem
-            {
-                TxHash = utxo.TxHash,
-                TxPos = utxo.TxPos,
-                Value = output.Value.Satoshi,
-                Height = utxo.Height
-            };
-        }
-
-        var matchingIndexes = Enumerable.Range(0, tx.Outputs.Count)
-            .Where(i => tx.Outputs[i].ScriptPubKey.ToBytes().SequenceEqual(scriptPubKey))
-            .ToList();
-        var correctedIndex = matchingIndexes
-            .Cast<int?>()
-            .FirstOrDefault(i => tx.Outputs[i.Value].Value.Satoshi == utxo.Value);
-        correctedIndex ??= matchingIndexes.Count == 1 ? matchingIndexes[0] : null;
-
-        if (correctedIndex is not int index)
-            return utxo;
-
-        var correctedOutput = tx.Outputs[index];
-        return new FlorestaElectrumUnspentItem
-        {
-            TxHash = utxo.TxHash,
-            TxPos = index,
-            Value = correctedOutput.Value.Satoshi,
-            Height = utxo.Height
-        };
-    }
-
-    private static bool BalanceMatchesListUnspent(
-        FlorestaElectrumBalance balance,
-        IReadOnlyCollection<FlorestaElectrumUnspentItem> utxos)
-    {
-        var confirmed = utxos.Where(u => u.Height > 0).Sum(u => u.Value);
-        var unconfirmed = utxos.Where(u => u.Height <= 0).Sum(u => u.Value);
-        return balance.Confirmed == confirmed && balance.Unconfirmed == unconfirmed;
-    }
-
-    private async Task UpdateUtxosForAddress(
-        FlorestaDbContext ctx, TrackedAddress addr,
-        FlorestaElectrumUnspentItem[] utxos, CancellationToken ct)
-    {
-        var currentUtxos = utxos
-            .GroupBy(u => $"{u.TxHash}:{u.TxPos}")
-            .Select(g => g.First())
-            .ToList();
-        var currentOutpoints = currentUtxos.Select(u => $"{u.TxHash}:{u.TxPos}").ToHashSet();
-
-        // Mark spent UTXOs
-        var existingUtxos = await ctx.Utxos
-            .Where(u => u.Scripthash == addr.Scripthash && !u.IsSpent)
-            .ToListAsync(ct);
-
-        foreach (var existing in existingUtxos)
-        {
-            if (!currentOutpoints.Contains(existing.Outpoint))
-            {
-                existing.IsSpent = true;
-            }
-        }
-
-        // Add new UTXOs
-        var existingByOutpoint = await ctx.Utxos
-            .Where(u => currentOutpoints.Contains(u.Outpoint))
-            .ToDictionaryAsync(u => u.Outpoint, ct);
-
-        foreach (var utxo in currentUtxos)
-        {
-            var outpoint = $"{utxo.TxHash}:{utxo.TxPos}";
-            if (existingByOutpoint.TryGetValue(outpoint, out var existing))
-            {
-                existing.WalletId = addr.WalletId;
-                existing.Scripthash = addr.Scripthash;
-                existing.Txid = utxo.TxHash;
-                existing.Vout = utxo.TxPos;
-                existing.Value = utxo.Value;
-                existing.ScriptPubKey = addr.ScriptPubKey;
-                existing.KeyPath = addr.KeyPath;
-                existing.BlockHeight = utxo.Height > 0 ? utxo.Height : null;
-                existing.IsSpent = false;
-                existing.SpendingTxid = null;
-                continue;
-            }
-
-            ctx.Utxos.Add(new TrackedUtxo
-            {
-                Outpoint = outpoint,
-                WalletId = addr.WalletId,
-                Scripthash = addr.Scripthash,
-                Txid = utxo.TxHash,
-                Vout = utxo.TxPos,
-                Value = utxo.Value,
-                ScriptPubKey = addr.ScriptPubKey,
-                KeyPath = addr.KeyPath,
-                BlockHeight = utxo.Height > 0 ? utxo.Height : null,
-                SeenAt = DateTimeOffset.UtcNow
-            });
-        }
-    }
-
-    private long ComputeBalanceChange(FlorestaDbContext ctx, Transaction tx, string walletId)
-    {
-        // Look up which of our addresses are involved
-        var ourScripts = ctx.TrackedAddresses
-            .Where(a => a.WalletId == walletId)
-            .Select(a => a.ScriptPubKey)
-            .ToHashSet(new ByteArrayComparer());
-
-        long change = 0;
-
-        // Outputs to us are positive
-        foreach (var output in tx.Outputs)
-        {
-            if (ourScripts.Contains(output.ScriptPubKey.ToBytes()))
-            {
-                change += output.Value.Satoshi;
-            }
-        }
-
-        // Inputs from us are negative (we'd need to look up the previous output)
-        // For simplicity, we check if the spent outpoint matches our UTXOs
-        foreach (var input in tx.Inputs)
-        {
-            var prevOutpoint = $"{input.PrevOut.Hash}:{input.PrevOut.N}";
-            var ourUtxo = ctx.Utxos.Local.FirstOrDefault(u => u.Outpoint == prevOutpoint && u.WalletId == walletId)
-                          ?? ctx.Utxos.FirstOrDefault(u => u.Outpoint == prevOutpoint && u.WalletId == walletId);
-            if (ourUtxo != null)
-            {
-                change -= ourUtxo.Value;
-            }
-        }
-
-        return change;
-    }
-
-    private async Task<List<TrackedAddress>> ExtendGapIfNeeded(FlorestaDbContext ctx, TrackedAddress usedAddr, CancellationToken ct)
-    {
-        await _addressPoolLock.WaitAsync(ct);
-        try
-        {
-            return await ExtendGapIfNeededCore(ctx, usedAddr, ct);
-        }
-        finally
-        {
-            _addressPoolLock.Release();
-        }
-    }
-
-    private async Task<List<TrackedAddress>> ExtendGapIfNeededCore(FlorestaDbContext ctx, TrackedAddress usedAddr, CancellationToken ct)
-    {
-        var addedAddresses = new List<TrackedAddress>();
-        if (!TrackedAddressReservationPolicy.TryGetKeyIndex(usedAddr.KeyPath, out var index))
-            return addedAddresses;
-
-        var wallet = await ctx.TrackedWallets.FindAsync(new object[] { usedAddr.WalletId }, ct);
-        if (wallet == null) return addedAddresses;
-
-        if (!_trackedStrategies.TryGetValue(wallet.Id, out var strategy))
-        {
-            strategy = ParseStrategy(wallet.DerivationStrategy ?? wallet.Id);
-            if (strategy == null)
-                return addedAddresses;
-            _trackedStrategies[wallet.Id] = strategy;
-        }
-
-        var currentGapIndex = usedAddr.IsChange ? wallet.ChangeGapIndex : wallet.ReceiveGapIndex;
-        var settings = await GetSettingsAsync();
-        var gapLimit = settings.GapLimit;
-
-        // If the address is within gapLimit of the current boundary, extend.
-        // This runs both for on-chain use and invoice reservation.
-        if (TrackedAddressReservationPolicy.ShouldExtendGap(index, currentGapIndex, gapLimit))
-        {
-            var newGapIndex = TrackedAddressReservationPolicy.GetExtendedGapIndex(index, gapLimit);
-            var deriveFrom = currentGapIndex + 1;
-            var deriveCount = newGapIndex - currentGapIndex;
-
-            if (deriveCount > 0)
-            {
-                var newAddresses = DeriveAddresses(strategy, usedAddr.IsChange, deriveFrom, deriveCount);
-                foreach (var addr in newAddresses)
-                {
-                    addr.WalletId = wallet.Id;
-                    ctx.TrackedAddresses.Add(addr);
-                    addedAddresses.Add(addr);
-                }
-
-                if (usedAddr.IsChange)
-                    wallet.ChangeGapIndex = newGapIndex;
-                else
-                    wallet.ReceiveGapIndex = newGapIndex;
-            }
-        }
-
-        return addedAddresses;
-    }
-
-    private async Task<List<TrackedAddress>> ExtendAddressPoolAsync(
-        FlorestaDbContext ctx,
-        string strategyStr,
-        bool isChange,
-        FlorestaSettings settings,
-        CancellationToken ct)
-    {
-        var addedAddresses = new List<TrackedAddress>();
-        var wallet = await ctx.TrackedWallets.FindAsync(new object[] { strategyStr }, ct);
-        if (wallet == null)
-            return addedAddresses;
-
-        var strategy = ParseStrategy(strategyStr);
-        if (strategy == null)
-            return addedAddresses;
-        _trackedStrategies[strategyStr] = strategy;
-
-        var currentGapIndex = isChange ? wallet.ChangeGapIndex : wallet.ReceiveGapIndex;
-        var deriveFrom = currentGapIndex + 1;
-        var deriveCount = Math.Max(settings.GapLimit, 1);
-        var newGapIndex = currentGapIndex + deriveCount;
-        var existingHashes = await ctx.TrackedAddresses
-            .Where(a => a.WalletId == strategyStr)
-            .Select(a => a.Scripthash)
-            .ToHashSetAsync(ct);
-
-        foreach (var addr in DeriveAddresses(strategy, isChange, deriveFrom, deriveCount))
-        {
-            if (existingHashes.Contains(addr.Scripthash))
-                continue;
-
-            addr.WalletId = strategyStr;
-            ctx.TrackedAddresses.Add(addr);
-            existingHashes.Add(addr.Scripthash);
-            addedAddresses.Add(addr);
-        }
-
-        if (isChange)
-            wallet.ChangeGapIndex = Math.Max(wallet.ChangeGapIndex, newGapIndex);
-        else
-            wallet.ReceiveGapIndex = Math.Max(wallet.ReceiveGapIndex, newGapIndex);
-
-        await ctx.SaveChangesAsync(ct);
-        return addedAddresses;
-    }
-
-    private class ByteArrayComparer : IEqualityComparer<byte[]>
-    {
-        public bool Equals(byte[] x, byte[] y) => x.SequenceEqual(y);
-        public int GetHashCode(byte[] obj) => BitConverter.ToInt32(obj, 0);
+        return FlorestaUtxoCache.NormalizeUtxoPosition(utxo, tx, scriptPubKey);
     }
 
     // ─────────────────────────────────────────────
@@ -1828,48 +736,6 @@ public class FlorestaWalletTracker
         public Money Value { get; set; }
         public string KeyPath { get; set; }
         public int KeyIndex { get; set; }
-    }
-
-    private NewTransactionInfo BuildNewTransactionInfo(
-        Transaction tx,
-        DerivationStrategyBase strategy,
-        FlorestaElectrumHistoryItem historyItem,
-        IReadOnlyDictionary<string, TrackedAddress> walletAddresses)
-    {
-        var info = new NewTransactionInfo
-        {
-            TxId = tx.GetHash().ToString(),
-            DerivationStrategy = strategy,
-            Confirmations = historyItem.Height > 0 && _tipHeight > 0
-                ? _tipHeight - historyItem.Height + 1 : 0,
-            IsRbf = tx.RBF,
-            SeenAt = DateTimeOffset.UtcNow
-        };
-
-        // Find outputs that match our tracked addresses
-        for (var i = 0; i < tx.Outputs.Count; i++)
-        {
-            var output = tx.Outputs[i];
-            var scriptHash = ScriptHashUtility.ComputeScriptHash(output.ScriptPubKey);
-
-            if (!walletAddresses.TryGetValue(scriptHash, out var outputAddress))
-                continue;
-
-            var parts = outputAddress.KeyPath.Split('/');
-            var keyIndex = parts.Length == 2 && int.TryParse(parts[1], out var idx) ? idx : 0;
-
-            info.Outputs.Add(new OutputInfo
-            {
-                Address = outputAddress.Address,
-                TrackedDestination = output.ScriptPubKey.Hash.ToString(),
-                Index = i,
-                Value = output.Value,
-                KeyPath = outputAddress.KeyPath,
-                KeyIndex = keyIndex
-            });
-        }
-
-        return info.Outputs.Count > 0 ? info : null;
     }
 
     private async Task<FlorestaSettings> GetSettingsAsync()

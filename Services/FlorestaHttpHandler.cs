@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Services;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
 using NBXplorer.DerivationStrategy;
@@ -25,17 +26,20 @@ namespace BTCPayServer.Plugins.Floresta.Services;
 public class FlorestaHttpHandler : HttpMessageHandler
 {
     private readonly FlorestaWalletTracker _tracker;
+    private readonly SettingsRepository _settingsRepository;
     private readonly BTCPayNetworkProvider _networkProvider;
     private readonly FlorestaStatusMonitor _statusMonitor;
     private readonly ILogger<FlorestaHttpHandler> _logger;
 
     public FlorestaHttpHandler(
         FlorestaWalletTracker tracker,
+        SettingsRepository settingsRepository,
         BTCPayNetworkProvider networkProvider,
         FlorestaStatusMonitor statusMonitor,
         ILogger<FlorestaHttpHandler> logger)
     {
         _tracker = tracker;
+        _settingsRepository = settingsRepository;
         _networkProvider = networkProvider;
         _statusMonitor = statusMonitor;
         _logger = logger;
@@ -50,6 +54,14 @@ public class FlorestaHttpHandler : HttpMessageHandler
 
         if (cryptoCode != null && !string.Equals(cryptoCode, "BTC", StringComparison.OrdinalIgnoreCase))
             return NotFoundResponse();
+
+        if (cryptoCode != null && !await IsBitcoinBackendActiveAsync())
+        {
+            return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            {
+                Content = new StringContent("Floresta Bitcoin backend is disabled.")
+            };
+        }
 
         _logger.LogDebug("Intercepting {Method} {Path}", method, SanitizePathForLog(path));
 
@@ -498,5 +510,11 @@ public class FlorestaHttpHandler : HttpMessageHandler
     private HttpResponseMessage NotFoundResponse()
     {
         return new HttpResponseMessage(HttpStatusCode.NotFound);
+    }
+
+    private async Task<bool> IsBitcoinBackendActiveAsync()
+    {
+        var settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+        return settings.IsBitcoinBackendActive();
     }
 }

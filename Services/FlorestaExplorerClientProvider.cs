@@ -1,34 +1,30 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
-using System.Reflection;
+using BTCPayServer.Configuration;
 using BTCPayServer.HostedServices;
+using BTCPayServer.Logging;
+using Microsoft.Extensions.Options;
 using NBXplorer;
 
 namespace BTCPayServer.Plugins.Floresta.Services;
 
 /// <summary>
-/// Replaces ExplorerClientProvider. Creates ExplorerClient instances backed by
-/// FlorestaHttpHandler, so all NBXplorer HTTP calls are intercepted and routed
-/// to our Electrum engine.
-///
-/// Since ExplorerClientProvider's methods (GetExplorerClient, IsAvailable, GetAll)
-/// are NOT virtual, we can't override them. Instead, we populate the base class's
-/// private _Clients dictionary via reflection so the base methods work correctly.
+/// Keeps the normal NBXplorer clients for non-BTC networks and replaces only
+/// the BTC client with the Floresta HTTP shim.
 /// </summary>
 public class FlorestaExplorerClientProvider : ExplorerClientProvider
 {
     public FlorestaExplorerClientProvider(
+        IHttpClientFactory httpClientFactory,
         BTCPayNetworkProvider networkProvider,
+        IOptions<NBXplorerOptions> nbXplorerOptions,
         NBXplorerDashboard dashboard,
+        Logs logs,
         FlorestaHttpHandler handler)
-        : base(new NullHttpClientFactory(), networkProvider, CreateEmptyOptions(), dashboard, CreateEmptyLogs())
+        : base(httpClientFactory, networkProvider, nbXplorerOptions, dashboard, logs)
     {
-        // Access the base class's private _Clients dictionary
-        var clientsField = typeof(ExplorerClientProvider)
-            .GetField("_Clients", BindingFlags.NonPublic | BindingFlags.Instance);
-        var clients = (Dictionary<string, ExplorerClient>)clientsField!.GetValue(this);
-
         var network = networkProvider.GetNetwork<BTCPayNetwork>("BTC");
         if (network is not null)
         {
@@ -43,22 +39,12 @@ public class FlorestaExplorerClientProvider : ExplorerClientProvider
             explorerClient.SetClient(httpClient);
             explorerClient.SetNoAuth();
 
-            clients[network.CryptoCode.ToUpperInvariant()] = explorerClient;
+            _Clients[network.CryptoCode.ToUpperInvariant()] = explorerClient;
         }
     }
 
-    private static Microsoft.Extensions.Options.IOptions<BTCPayServer.Configuration.NBXplorerOptions> CreateEmptyOptions()
+    public override IEnumerable<(BTCPayNetwork, ExplorerClient)> GetAll()
     {
-        return Microsoft.Extensions.Options.Options.Create(new BTCPayServer.Configuration.NBXplorerOptions());
-    }
-
-    private static BTCPayServer.Logging.Logs CreateEmptyLogs()
-    {
-        return new BTCPayServer.Logging.Logs();
-    }
-
-    private class NullHttpClientFactory : IHttpClientFactory
-    {
-        public HttpClient CreateClient(string name) => new HttpClient();
+        return base.GetAll().Where(pair => !pair.Item1.IsBTC);
     }
 }
