@@ -24,7 +24,9 @@
 
     <ItemGroup>
         <ProjectReference Include="..\BTCPayServer.Plugins.Floresta.csproj" />
-        <ProjectReference Include="..\submodules\btcpayserver\BTCPayServer\BTCPayServer.csproj" />
+        <ProjectReference Include="..\submodules\btcpayserver\BTCPayServer\BTCPayServer.csproj">
+            <Properties>StaticWebAssetsEnabled=false</Properties>
+        </ProjectReference>
     </ItemGroup>
 
 </Project>

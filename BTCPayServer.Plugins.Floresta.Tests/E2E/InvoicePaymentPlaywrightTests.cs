@@ -1,9 +1,9 @@
 using System;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
-using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -165,8 +165,8 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
     private static async Task ConnectRegtestMeshAsync(RPCClient bitcoin)
     {
-        var bitcoindEndpoint = await ResolveP2PEndpointAsync("E2E_BITCOIND_P2P_HOST", "E2E_BITCOIND_P2P_PORT", "127.0.0.1", 39388);
-        var utreexodEndpoint = await ResolveP2PEndpointAsync("E2E_UTREEXOD_P2P_HOST", "E2E_UTREEXOD_P2P_PORT", "127.0.0.1", 38333);
+        var bitcoindEndpoint = ResolveP2PEndpoint("E2E_BITCOIND_P2P_HOST", "E2E_BITCOIND_P2P_PORT", "bitcoind", 39388);
+        var utreexodEndpoint = ResolveP2PEndpoint("E2E_UTREEXOD_P2P_HOST", "E2E_UTREEXOD_P2P_PORT", "utreexod", 38333);
 
         await AddFlorestaPeerAsync(utreexodEndpoint);
         await AddBitcoinPeerAsync(bitcoin, utreexodEndpoint);
@@ -174,17 +174,79 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await WaitForRegtestMeshAsync(bitcoin, bitcoindEndpoint, utreexodEndpoint);
     }
 
-    private static async Task<string> ResolveP2PEndpointAsync(string hostVariable, string portVariable, string defaultHost, int defaultPort)
+    private static string ResolveP2PEndpoint(string hostVariable, string portVariable, string defaultHost, int defaultPort)
     {
-        var host = Environment.GetEnvironmentVariable(hostVariable) ?? defaultHost;
+        var host = Environment.GetEnvironmentVariable(hostVariable) ??
+                   TryResolveComposeServiceIp(defaultHost) ??
+                   defaultHost;
         var port = int.TryParse(Environment.GetEnvironmentVariable(portVariable), out var parsedPort)
             ? parsedPort
             : defaultPort;
-        var ip = (await Dns.GetHostAddressesAsync(host))
-            .First(a => a.AddressFamily == AddressFamily.InterNetwork)
-            .ToString();
+        return $"{host}:{port}";
+    }
 
-        return $"{ip}:{port}";
+    private static string? TryResolveComposeServiceIp(string serviceName)
+    {
+        try
+        {
+            var composeFile = Path.Combine(GetRepoRoot(), "docker-compose.integration.yml");
+            var container = RunProcess("docker", "compose", "-f", composeFile, "ps", "-q", serviceName);
+            if (string.IsNullOrWhiteSpace(container))
+                return null;
+
+            var ip = RunProcess(
+                "docker",
+                "inspect",
+                "-f",
+                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                container.Trim());
+            return string.IsNullOrWhiteSpace(ip) ? null : ip.Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? RunProcess(string fileName, params string[] args)
+    {
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo(fileName)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            }
+        };
+
+        foreach (var arg in args)
+            process.StartInfo.ArgumentList.Add(arg);
+
+        process.Start();
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit(5_000))
+        {
+            process.Kill(entireProcessTree: true);
+            return null;
+        }
+
+        _ = error.GetAwaiter().GetResult();
+        return process.ExitCode == 0 ? output.GetAwaiter().GetResult() : null;
+    }
+
+    private static string GetRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "BTCPayServer.Plugins.Floresta.csproj")))
+                return dir.FullName;
+            dir = dir.Parent;
+        }
+
+        throw new InvalidOperationException("Could not locate repository root.");
     }
 
     private static async Task AddFlorestaPeerAsync(string endpoint)

@@ -40,7 +40,7 @@ public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
             throw new InvalidOperationException($"Floresta plugin assembly not found at {pluginDll}");
 
         var postgres = Environment.GetEnvironmentVariable("E2E_POSTGRES") ??
-                       "User ID=postgres;Include Error Detail=true;Host=127.0.0.1;Port=39372;Database=btcpayserver_floresta_e2e";
+                       "User ID=postgres;Password=postgres;Include Error Detail=true;Host=127.0.0.1;Port=39372;Database=btcpayserver_floresta_e2e";
 
         var args = new[]
         {
