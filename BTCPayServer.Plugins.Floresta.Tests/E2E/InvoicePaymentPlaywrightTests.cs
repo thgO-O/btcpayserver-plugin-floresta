@@ -20,8 +20,10 @@ namespace BTCPayServer.Plugins.Floresta.Tests.E2E;
 [Collection(FlorestaE2ECollection.Name)]
 public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 {
-    private const string WalletXpubBip84 =
-        "vpub5ZrpbMUWLCJ6MbpU1RzocWBddAQnk2XYry9JSXrtzxSqoicei28CzqUhiN2HJ8z2VjY6rsUNf4qxjym43ydhAFQJ7BDDcC2bK6et6x9hc4D";
+    private const string WalletSeedMnemonic =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    private static readonly KeyPath WalletAccountKeyPath = new("84'/1'/0'");
 
     private readonly BtcpayFlorestaWebAppFixture _server;
     private IPlaywright? _playwright;
@@ -35,7 +37,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
     [Fact(Timeout = 360_000)]
     [Trait("Playwright", "Playwright")]
-    public async Task BTCPayInvoiceCanBePaidThroughFlorestaAndCreditsWalletBalance()
+    public async Task BTCPayInvoiceCanBePaidAndSpentThroughFlorestaWallet()
     {
         var page = _page ?? throw new InvalidOperationException("Playwright page is not initialized.");
 
@@ -47,6 +49,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await ConnectRegtestMeshAsync(bitcoin);
         await FundBitcoinMinerAsync(bitcoinWallet);
         await SubmitBitcoinChainToUtreexodAsync(bitcoin);
+        await RefreshFlorestaUtreexoPeerAsync();
         var chainHeight = await bitcoin.GetBlockCountAsync();
         var bestBlockHash = await GetBitcoinBestBlockHashAsync(bitcoin);
         await WaitForUtreexodChainAsync(chainHeight, bestBlockHash);
@@ -58,18 +61,20 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await AddWatchOnlyWallet(page, storeId);
         await WaitForDescriptorsAsync();
 
-        var invoiceId = await CreateInvoice(page, storeId, "0.00010000", "BTC");
+        var invoiceAmount = Money.Coins(0.001m);
+        var invoiceId = await CreateInvoice(page, storeId, "0.00100000", "BTC");
         await page.GotoAsync(new Uri(_server.ServerUri, $"/i/{invoiceId}").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
         await AssertNoUiError(page);
 
         var invoiceAddress = await page.Locator("#Address_BTC-CHAIN .truncate-center").GetAttributeAsync("data-text");
         Assert.False(string.IsNullOrWhiteSpace(invoiceAddress));
 
-        var txId = await bitcoinWallet.SendToAddressAsync(BitcoinAddress.Create(invoiceAddress!, Network.RegTest), Money.Coins(0.0001m));
+        var txId = await bitcoinWallet.SendToAddressAsync(BitcoinAddress.Create(invoiceAddress!, Network.RegTest), invoiceAmount);
         var rawTx = await bitcoin.GetRawTransactionAsync(txId);
         await FlorestaRpcAsync("sendrawtransaction", new object[] { rawTx.ToHex() });
         await bitcoinWallet.GenerateToAddressAsync(1, await bitcoinWallet.GetNewAddressAsync());
         await SubmitBitcoinChainToUtreexodAsync(bitcoin);
+        await RefreshFlorestaUtreexoPeerAsync();
         await WaitForUtreexodChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
         await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
 
@@ -94,8 +99,27 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
             var row = page.Locator($"tr.transaction-row[data-value='{txId}']");
             await Expect(row).ToBeVisibleAsync(new LocatorAssertionsToBeVisibleOptions { Timeout = 5_000 });
-            await Expect(row).ToContainTextAsync("0.00010000", new LocatorAssertionsToContainTextOptions { Timeout = 5_000 });
+            await Expect(row).ToContainTextAsync("0.00100000", new LocatorAssertionsToContainTextOptions { Timeout = 5_000 });
         }, TimeSpan.FromSeconds(120), "wallet balance transaction to appear");
+
+        var spendTxId = await SpendFromBtcpayWalletWithSeed(page, storeId, bitcoinWallet);
+        await WaitForBitcoinMempoolAsync(bitcoin, spendTxId);
+        await bitcoinWallet.GenerateToAddressAsync(1, await bitcoinWallet.GetNewAddressAsync());
+        await SubmitBitcoinChainToUtreexodAsync(bitcoin);
+        await RefreshFlorestaUtreexoPeerAsync();
+        await WaitForUtreexodChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
+        await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
+
+        await EventuallyAsync(async () =>
+        {
+            var response = await page.GotoAsync(walletUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
+            Assert.True(response?.Ok, $"Wallet page returned HTTP {response?.Status} at {page.Url}");
+            await AssertNoUiError(page);
+
+            var row = page.Locator($"tr.transaction-row[data-value='{spendTxId}']");
+            await Expect(row).ToBeVisibleAsync(new LocatorAssertionsToBeVisibleOptions { Timeout = 5_000 });
+            await Expect(row.Locator(".amount-col")).ToContainTextAsync("-", new LocatorAssertionsToContainTextOptions { Timeout = 5_000 });
+        }, TimeSpan.FromSeconds(120), "BTCPay wallet spend transaction to appear");
     }
 
     public async Task InitializeAsync()
@@ -265,6 +289,19 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         }
     }
 
+    private static async Task RefreshFlorestaUtreexoPeerAsync()
+    {
+        var endpoint = ResolveP2PEndpoint("E2E_UTREEXOD_P2P_HOST", "E2E_UTREEXOD_P2P_PORT", "utreexod", 38333);
+        await EventuallyAsync(async () =>
+        {
+            await TryFlorestaRpcAsync("addnode", new object[] { endpoint, "onetry", false });
+            var peers = await FlorestaRpcAsync("getpeerinfo", Array.Empty<object>());
+            Assert.True(
+                peers.EnumerateArray().Any(peer => PeerMatches(peer, "address", endpoint)),
+                $"Expected Floresta to have a utreexod peer at {endpoint}");
+        }, TimeSpan.FromSeconds(30), "Floresta utreexod connection retry");
+    }
+
     private static async Task WaitForRegtestMeshAsync(RPCClient bitcoin, string bitcoindEndpoint, string utreexodEndpoint)
     {
         await EventuallyAsync(async () =>
@@ -337,6 +374,17 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         var response = await bitcoin.SendCommandAsync(method, parameters);
         using var doc = JsonDocument.Parse(response.Result.ToString());
         return doc.RootElement.Clone();
+    }
+
+    private static async Task WaitForBitcoinMempoolAsync(RPCClient bitcoin, uint256 txId)
+    {
+        await EventuallyAsync(async () =>
+        {
+            var mempool = await BitcoinRpcJsonAsync(bitcoin, "getrawmempool");
+            Assert.Contains(
+                mempool.EnumerateArray(),
+                tx => string.Equals(tx.GetString(), txId.ToString(), StringComparison.OrdinalIgnoreCase));
+        }, TimeSpan.FromSeconds(60), $"bitcoind mempool to contain {txId}");
     }
 
     private static async Task WaitForFlorestaChainAsync(int expectedHeight, string expectedBestBlock)
@@ -421,6 +469,19 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
             throw new InvalidOperationException($"Floresta RPC {method} failed: HTTP {(int)response.StatusCode} {body}");
 
         return doc.RootElement.GetProperty("result").Clone();
+    }
+
+    private static async Task<bool> TryFlorestaRpcAsync(string method, object[] parameters)
+    {
+        try
+        {
+            await FlorestaRpcAsync(method, parameters);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
     }
 
     private static async Task<JsonElement> UtreexodRpcAsync(string method, object[] parameters)
@@ -519,13 +580,57 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await AssertNoUiError(page);
         await page.Locator("#ImportWalletOptionsLink").ClickAsync();
         await page.Locator("#ImportXpubLink").ClickAsync();
-        await page.Locator("#DerivationScheme").FillAsync(WalletXpubBip84);
+        await page.Locator("#DerivationScheme").FillAsync(GetWalletDerivationScheme());
         await page.Locator("#Continue").ClickAsync();
         var confirm = page.Locator("#Confirm");
         await Expect(confirm).ToBeVisibleAsync();
         await confirm.EvaluateAsync("button => button.click()");
         await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 30_000 });
         await Expect(page.Locator(".alert-success")).ToContainTextAsync("Wallet settings for BTC have been updated", new LocatorAssertionsToContainTextOptions { Timeout = 30_000 });
+    }
+
+    private static string GetWalletDerivationScheme()
+    {
+        var rootKey = new Mnemonic(WalletSeedMnemonic).DeriveExtKey();
+        var accountKey = rootKey.Derive(WalletAccountKeyPath).Neuter().GetWif(Network.RegTest);
+        var fingerprint = rootKey.GetPublicKey().GetHDFingerPrint();
+        return $"wpkh([{fingerprint}/{WalletAccountKeyPath}]{accountKey}/<0;1>/*)";
+    }
+
+    private async Task<uint256> SpendFromBtcpayWalletWithSeed(IPage page, string storeId, RPCClient bitcoinWallet)
+    {
+        var destination = await bitcoinWallet.GetNewAddressAsync();
+        await page.GotoAsync(new Uri(_server.ServerUri, $"/wallets/S-{storeId}-BTC/send").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
+        await AssertNoUiError(page);
+
+        await page.Locator("#Outputs_0__DestinationAddress").FillAsync(destination.ToString());
+        await page.Locator("#Outputs_0__Amount").FillAsync("0.00040000");
+        await page.Locator("#FeeSatoshiPerByte").FillAsync("1");
+        await page.Locator("#SignTransaction").ClickAsync();
+        await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 30_000 });
+        await AssertNoUiError(page);
+
+        await page.Locator("#SignWithSeed").ClickAsync();
+        await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 30_000 });
+        await AssertNoUiError(page);
+
+        await page.Locator("#SeedOrKey").FillAsync(WalletSeedMnemonic);
+        await page.Locator("#Submit").ClickAsync();
+        await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 30_000 });
+        await AssertNoUiError(page);
+
+        var broadcast = page.Locator("#BroadcastTransaction");
+        await Expect(broadcast).ToBeVisibleAsync(new LocatorAssertionsToBeVisibleOptions { Timeout = 30_000 });
+        await broadcast.ClickAsync();
+        await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 30_000 });
+        await AssertNoUiError(page);
+
+        var success = page.Locator(".alert-success").First;
+        await Expect(success).ToContainTextAsync("Transaction broadcasted successfully", new LocatorAssertionsToContainTextOptions { Timeout = 30_000 });
+        var successText = await success.InnerTextAsync();
+        var match = Regex.Match(successText, @"\b[0-9a-f]{64}\b", RegexOptions.IgnoreCase);
+        Assert.True(match.Success, $"Could not extract broadcast transaction id from success message: {successText}");
+        return uint256.Parse(match.Value);
     }
 
     private async Task<string> CreateInvoice(IPage page, string storeId, string amount, string currency)
