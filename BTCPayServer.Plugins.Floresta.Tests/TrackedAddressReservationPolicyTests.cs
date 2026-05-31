@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using BTCPayServer.Plugins.Floresta.Data;
+using BTCPayServer.Plugins.Floresta.Floresta;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Floresta.Tests;

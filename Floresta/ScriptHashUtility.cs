@@ -2,7 +2,7 @@ using System;
 using System.Security.Cryptography;
 using NBitcoin;
 
-namespace BTCPayServer.Plugins.Floresta;
+namespace BTCPayServer.Plugins.Floresta.Floresta;
 
 public static class ScriptHashUtility
 {

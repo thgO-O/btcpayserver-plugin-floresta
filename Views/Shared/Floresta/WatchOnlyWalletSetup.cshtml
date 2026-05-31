@@ -1,5 +1,4 @@
 @model BTCPayServer.Models.StoreViewModels.WalletSetupViewModel
-@using BTCPayServer.Plugins.Floresta
 @using BTCPayServer.Services
 @inject SettingsRepository SettingsRepository
 @{
@@ -27,7 +26,7 @@
     <script>
         document.querySelectorAll('#GenerateWalletLink,#GenerateHotwalletLink,#GenerateWatchonlyLink,#ImportSeedLink')
             .forEach(function (element) {
-                var group = element.closest('.list-group');
+                let group = element.closest('.list-group');
                 (group || element).remove();
             });
     </script>

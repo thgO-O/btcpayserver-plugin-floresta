@@ -11,21 +11,13 @@ using Microsoft.AspNetCore.Mvc.ViewFeatures;
 
 namespace BTCPayServer.Plugins.Floresta.Filters;
 
-public sealed class FlorestaWatchOnlyWalletSetupFilter : IAsyncActionFilter
+public sealed class FlorestaWatchOnlyWalletSetupFilter(
+    SettingsRepository settingsRepository,
+    ITempDataDictionaryFactory tempDataFactory)
+    : IAsyncActionFilter
 {
     private const string WatchOnlyMessage =
         "Floresta is watch-only in this plugin. Connect an existing xpub or descriptor; Floresta does not create or store private keys.";
-
-    private readonly SettingsRepository _settingsRepository;
-    private readonly ITempDataDictionaryFactory _tempDataFactory;
-
-    public FlorestaWatchOnlyWalletSetupFilter(
-        SettingsRepository settingsRepository,
-        ITempDataDictionaryFactory tempDataFactory)
-    {
-        _settingsRepository = settingsRepository;
-        _tempDataFactory = tempDataFactory;
-    }
 
     public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
     {
@@ -36,7 +28,7 @@ public sealed class FlorestaWatchOnlyWalletSetupFilter : IAsyncActionFilter
             return;
         }
 
-        var tempData = _tempDataFactory.GetTempData(context.HttpContext);
+        var tempData = tempDataFactory.GetTempData(context.HttpContext);
         tempData.SetStatusMessageModel(new StatusMessageModel
         {
             Severity = StatusMessageModel.StatusSeverity.Warning,
@@ -61,7 +53,7 @@ public sealed class FlorestaWatchOnlyWalletSetupFilter : IAsyncActionFilter
         if (!FlorestaBackendMode.IsBackendReplacementEnabled())
             return false;
 
-        var settings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+        var settings = await settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
         return settings.Enabled &&
                settings.UseFlorestaAsBitcoinBackend &&
                string.Equals(settings.CryptoCode, "BTC", StringComparison.OrdinalIgnoreCase);

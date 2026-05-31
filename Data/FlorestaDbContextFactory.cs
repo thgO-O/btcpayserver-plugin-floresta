@@ -9,13 +9,9 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Infrastructure;
 
 namespace BTCPayServer.Plugins.Floresta.Data;
 
-public class FlorestaDbContextFactory : BaseDbContextFactory<FlorestaDbContext>
+public class FlorestaDbContextFactory(IOptions<DatabaseOptions> options)
+    : BaseDbContextFactory<FlorestaDbContext>(options, "BTCPayServer.Plugins.Floresta")
 {
-    public FlorestaDbContextFactory(IOptions<DatabaseOptions> options)
-        : base(options, "BTCPayServer.Plugins.Floresta")
-    {
-    }
-
     public override FlorestaDbContext CreateContext(Action<NpgsqlDbContextOptionsBuilder> npgsqlOptionsAction = null)
     {
         var builder = new DbContextOptionsBuilder<FlorestaDbContext>();

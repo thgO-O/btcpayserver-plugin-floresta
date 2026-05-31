@@ -1,4 +1,4 @@
-using BTCPayServer.Plugins.Floresta;
+using BTCPayServer.Plugins.Floresta.Floresta;
 using NBitcoin;
 using Xunit;
 

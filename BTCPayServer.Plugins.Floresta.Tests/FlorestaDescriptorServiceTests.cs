@@ -1,5 +1,6 @@
 using System;
 using BTCPayServer.Logging;
+using BTCPayServer.Plugins.Floresta.Floresta;
 using NBXplorer;
 using NBXplorer.DerivationStrategy;
 using NBitcoin;
