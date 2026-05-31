@@ -11,28 +11,18 @@ using Microsoft.Extensions.Logging;
 
 namespace BTCPayServer.Plugins.Floresta;
 
-public class FlorestaRpcClient
+public class FlorestaRpcClient(
+    SettingsRepository settingsRepository,
+    ILogger<FlorestaRpcClient> logger,
+    HttpClient httpClient)
 {
-    private readonly SettingsRepository _settingsRepository;
-    private readonly ILogger<FlorestaRpcClient> _logger;
-    private readonly HttpClient _httpClient;
     private readonly bool _explicitSettings;
-    private FlorestaSettings _settings;
+    private readonly FlorestaSettings _settings;
     private int _nextId;
 
     public FlorestaRpcClient(SettingsRepository settingsRepository, ILogger<FlorestaRpcClient> logger)
         : this(settingsRepository, logger, new HttpClient { Timeout = TimeSpan.FromSeconds(30) })
     {
-    }
-
-    public FlorestaRpcClient(
-        SettingsRepository settingsRepository,
-        ILogger<FlorestaRpcClient> logger,
-        HttpClient httpClient)
-    {
-        _settingsRepository = settingsRepository;
-        _logger = logger;
-        _httpClient = httpClient;
     }
 
     public FlorestaRpcClient(FlorestaSettings settings, ILogger<FlorestaRpcClient> logger)
@@ -51,17 +41,17 @@ public class FlorestaRpcClient
 
     public async Task PingAsync(CancellationToken ct)
     {
-        await CallAsync<JsonElement>("ping", Array.Empty<object>(), ct);
+        await CallAsync<JsonElement>("ping", [], ct);
     }
 
     public Task<JsonElement> GetBlockchainInfoAsync(CancellationToken ct)
     {
-        return CallAsync<JsonElement>("getblockchaininfo", Array.Empty<object>(), ct);
+        return CallAsync<JsonElement>("getblockchaininfo", [], ct);
     }
 
     public Task<bool> LoadDescriptorAsync(string descriptor, CancellationToken ct)
     {
-        return CallAsync<bool>("loaddescriptor", new object[] { descriptor }, ct);
+        return CallAsync<bool>("loaddescriptor", [descriptor], ct);
     }
 
     public Task<JsonElement> RescanBlockchainAsync(
@@ -72,19 +62,20 @@ public class FlorestaRpcClient
         CancellationToken ct)
     {
         var parameters = new List<object>();
-        if (startHeight is not null || stopHeight is not null || useTimestamp || !string.IsNullOrEmpty(confidence))
+        var hasCustomConfidence = !string.IsNullOrEmpty(confidence) &&
+                                  !string.Equals(confidence, "medium", StringComparison.OrdinalIgnoreCase);
+        var includeStopDependentArgs = stopHeight is not null || useTimestamp || hasCustomConfidence;
+
+        if (startHeight is not null || includeStopDependentArgs)
         {
             parameters.Add(startHeight ?? 0);
-            if (stopHeight is not null || useTimestamp || !string.IsNullOrEmpty(confidence))
+            if (includeStopDependentArgs)
             {
-                if (stopHeight is not null)
+                parameters.Add(stopHeight ?? 0);
+                if (useTimestamp || hasCustomConfidence)
                 {
-                    parameters.Add(stopHeight.Value);
-                    if (useTimestamp || !string.IsNullOrEmpty(confidence))
-                    {
-                        parameters.Add(useTimestamp);
-                        parameters.Add(string.IsNullOrEmpty(confidence) ? "medium" : confidence);
-                    }
+                    parameters.Add(useTimestamp);
+                    parameters.Add(hasCustomConfidence ? confidence : "medium");
                 }
             }
         }
@@ -94,17 +85,17 @@ public class FlorestaRpcClient
 
     public Task<string[]> ListDescriptorsAsync(CancellationToken ct)
     {
-        return CallAsync<string[]>("listdescriptors", Array.Empty<object>(), ct);
+        return CallAsync<string[]>("listdescriptors", [], ct);
     }
 
     public Task<JsonElement> AddNodeAsync(string node, string command, bool v2Transport, CancellationToken ct)
     {
-        return CallAsync<JsonElement>("addnode", new object[] { node, command, v2Transport }, ct);
+        return CallAsync<JsonElement>("addnode", [node, command, v2Transport], ct);
     }
 
     public Task<string> SendRawTransactionAsync(string hex, CancellationToken ct)
     {
-        return CallAsync<string>("sendrawtransaction", new object[] { hex }, ct);
+        return CallAsync<string>("sendrawtransaction", [hex], ct);
     }
 
     private async Task<T> CallAsync<T>(string method, object[] parameters, CancellationToken ct)
@@ -131,7 +122,7 @@ public class FlorestaRpcClient
         });
         request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
 
-        using var response = await _httpClient.SendAsync(request, ct);
+        using var response = await httpClient.SendAsync(request, ct);
         var body = await response.Content.ReadAsStringAsync(ct);
         if (!response.IsSuccessStatusCode)
             throw new FlorestaRpcException($"Floresta RPC {method} failed with HTTP {(int)response.StatusCode}: {body}");
@@ -150,7 +141,7 @@ public class FlorestaRpcClient
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to deserialize Floresta RPC {Method} response: {Result}", method, result.ToString());
+            logger.LogError(ex, "Failed to deserialize Floresta RPC {Method} response: {Result}", method, result.ToString());
             throw;
         }
     }
@@ -160,13 +151,8 @@ public class FlorestaRpcClient
         if (_explicitSettings)
             return _settings;
 
-        return await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+        return await settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
     }
 }
 
-public class FlorestaRpcException : Exception
-{
-    public FlorestaRpcException(string message) : base(message)
-    {
-    }
-}
+public class FlorestaRpcException(string message) : Exception(message);

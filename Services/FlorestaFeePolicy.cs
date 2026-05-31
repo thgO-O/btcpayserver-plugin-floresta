@@ -6,7 +6,7 @@ namespace BTCPayServer.Plugins.Floresta.Services;
 
 internal static class FlorestaFeePolicy
 {
-    internal const decimal MaxReasonableFeeRateSatsPerByte = 10_000m;
+    private const decimal MaxReasonableFeeRateSatsPerByte = 10_000m;
 
     public static bool TryCreateFeeRateFromEstimate(
         decimal btcPerKb,
@@ -15,7 +15,7 @@ internal static class FlorestaFeePolicy
     {
         feeRate = null;
         var satPerByte = btcPerKb * 100_000m;
-        if (satPerByte <= 0 || satPerByte > MaxReasonableFeeRateSatsPerByte)
+        if (satPerByte is <= 0 or > MaxReasonableFeeRateSatsPerByte)
             return false;
 
         feeRate = new FeeRate(Math.Max(satPerByte, NormalizeFallback(fallbackSatsPerByte)));
@@ -38,11 +38,9 @@ internal static class FlorestaFeePolicy
             if (cached.Key == blockTarget)
                 return ClampToFallback(cached.Value.Rate, fallbackSatsPerByte);
 
-            if (cached.Value.CachedAt > freshestAt)
-            {
-                freshestRate = cached.Value.Rate;
-                freshestAt = cached.Value.CachedAt;
-            }
+            if (cached.Value.CachedAt <= freshestAt) continue;
+            freshestRate = cached.Value.Rate;
+            freshestAt = cached.Value.CachedAt;
         }
 
         return freshestRate is null
@@ -56,12 +54,12 @@ internal static class FlorestaFeePolicy
         return feeRate.SatoshiPerByte < fallback ? new FeeRate(fallback) : feeRate;
     }
 
-    public static FeeRate CreateFallbackFeeRate(decimal fallbackSatsPerByte)
+    private static FeeRate CreateFallbackFeeRate(decimal fallbackSatsPerByte)
     {
         return new FeeRate(NormalizeFallback(fallbackSatsPerByte));
     }
 
-    public static decimal NormalizeFallback(decimal fallbackSatsPerByte)
+    private static decimal NormalizeFallback(decimal fallbackSatsPerByte)
     {
         return fallbackSatsPerByte > 0
             ? fallbackSatsPerByte

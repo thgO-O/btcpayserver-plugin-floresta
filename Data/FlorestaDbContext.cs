@@ -2,10 +2,8 @@ using Microsoft.EntityFrameworkCore;
 
 namespace BTCPayServer.Plugins.Floresta.Data;
 
-public class FlorestaDbContext : DbContext
+public class FlorestaDbContext(DbContextOptions<FlorestaDbContext> options) : DbContext(options)
 {
-    public FlorestaDbContext(DbContextOptions<FlorestaDbContext> options) : base(options) { }
-
     public DbSet<TrackedWallet> TrackedWallets { get; set; }
     public DbSet<TrackedAddress> TrackedAddresses { get; set; }
     public DbSet<TrackedUtxo> Utxos { get; set; }

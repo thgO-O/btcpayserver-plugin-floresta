@@ -59,6 +59,19 @@ public class FlorestaRpcClientTests
     }
 
     [Fact]
+    public async Task RescanBlockchainAsyncOmitsDefaultConfidenceWhenBoundsAreUnset()
+    {
+        var handler = new RecordingRpcHandler(_ => new { result = new { } });
+        var client = CreateClient(handler);
+
+        await client.RescanBlockchainAsync(null, null, false, "medium", CancellationToken.None);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal("rescanblockchain", request.Method);
+        Assert.Empty(request.Params);
+    }
+
+    [Fact]
     public async Task ThrowsOnRpcError()
     {
         var handler = new RecordingRpcHandler(_ => new

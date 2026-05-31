@@ -69,10 +69,8 @@ internal static class FlorestaChainInfoParser
         if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
             return null;
 
-        if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var value))
-            return value;
-
-        if (property.ValueKind == JsonValueKind.String && int.TryParse(property.GetString(), out value))
+        if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var value) ||
+            property.ValueKind == JsonValueKind.String && int.TryParse(property.GetString(), out value))
             return value;
 
         return null;
@@ -83,13 +81,12 @@ internal static class FlorestaChainInfoParser
         if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
             return null;
 
-        if (property.ValueKind is JsonValueKind.True or JsonValueKind.False)
-            return property.GetBoolean();
-
-        if (property.ValueKind == JsonValueKind.String && bool.TryParse(property.GetString(), out var value))
-            return value;
-
-        return null;
+        return property.ValueKind switch
+        {
+            JsonValueKind.True or JsonValueKind.False => property.GetBoolean(),
+            JsonValueKind.String when bool.TryParse(property.GetString(), out var value) => value,
+            _ => null
+        };
     }
 
     private static string GetString(JsonElement element, string propertyName)

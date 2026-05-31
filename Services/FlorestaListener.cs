@@ -3,9 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Client.Models;
 using BTCPayServer.Data;
 using BTCPayServer.Events;
-using BTCPayServer.HostedServices;
 using BTCPayServer.Payments;
 using BTCPayServer.Payments.Bitcoin;
 using BTCPayServer.Services;
@@ -252,7 +252,7 @@ public class FlorestaListener : IHostedService
         foreach (var newTx in newTxs)
         {
             ct.ThrowIfCancellationRequested();
-            await ProcessNewTransaction(newTx, network, wallet, pmi);
+            await ProcessNewTransaction(newTx, network, wallet, pmi, ct);
         }
     }
 
@@ -268,7 +268,7 @@ public class FlorestaListener : IHostedService
 
     private async Task ProcessNewTransaction(
         FlorestaWalletTracker.NewTransactionInfo txInfo,
-        BTCPayNetwork network, BTCPayWallet wallet, PaymentMethodId pmi)
+        BTCPayNetwork network, BTCPayWallet wallet, PaymentMethodId pmi, CancellationToken ct)
     {
         wallet.InvalidateCache(txInfo.DerivationStrategy);
 
@@ -296,9 +296,13 @@ public class FlorestaListener : IHostedService
                 new OutPoint(uint256.Parse(txInfo.TxId), (uint)output.Index),
                 txInfo.IsRbf,
                 new KeyPath(output.KeyPath),
-                output.KeyIndex);
+                output.KeyIndex)
+            {
+                ConfirmationCount = ClampConfirmations(txInfo.Confirmations, network)
+            };
 
             paymentData.Set(invoice, handler, details);
+            paymentData.Status = GetPaymentStatus(invoice, details);
 
             var payment = await _paymentService.AddPayment(paymentData, [txInfo.TxId]);
             if (payment != null)
@@ -309,6 +313,11 @@ public class FlorestaListener : IHostedService
                 {
                     Payment = payment
                 });
+            }
+            else
+            {
+                if (await UpdatePaymentStatesForInvoice(network, pmi, invoice, ct))
+                    _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
             }
         }
     }
@@ -325,7 +334,7 @@ public class FlorestaListener : IHostedService
         var handler = _handlers.GetBitcoinHandler(network);
         if (handler == null) return;
 
-        var invoices = await _invoiceRepository.GetMonitoredInvoices(pmi);
+        var invoices = await _invoiceRepository.GetMonitoredInvoices(pmi, ct);
         var paymentCount = 0;
 
         foreach (var invoice in invoices)
@@ -375,9 +384,13 @@ public class FlorestaListener : IHostedService
                         coin.OutPoint,
                         tx.Transaction?.RBF ?? false,
                         coin.KeyPath,
-                        coin.KeyIndex);
+                        coin.KeyIndex)
+                    {
+                        ConfirmationCount = ClampConfirmations(tx.Confirmations, network)
+                    };
 
                     paymentData.Set(invoice, handler, details);
+                    paymentData.Status = GetPaymentStatus(invoice, details);
 
                     var payment = await _paymentService.AddPayment(paymentData, [coin.OutPoint.Hash.ToString()]);
                     if (payment != null)
@@ -387,6 +400,11 @@ public class FlorestaListener : IHostedService
                         {
                             Payment = payment
                         });
+                    }
+                    else
+                    {
+                        if (await UpdatePaymentStatesForInvoice(network, pmi, invoice, ct))
+                            _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
                     }
                 }
             }
@@ -461,11 +479,89 @@ public class FlorestaListener : IHostedService
 
     private async Task UpdatePaymentStates(BTCPayNetwork network, PaymentMethodId pmi, CancellationToken ct)
     {
-        var invoices = await _invoiceRepository.GetMonitoredInvoices(pmi);
+        var invoices = await _invoiceRepository.GetMonitoredInvoices(pmi, ct);
         foreach (var invoice in invoices)
         {
-            _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
+            if (await UpdatePaymentStatesForInvoice(network, pmi, invoice, ct))
+                _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
         }
+    }
+
+    private async Task<bool> UpdatePaymentStatesForInvoice(
+        BTCPayNetwork network,
+        PaymentMethodId pmi,
+        InvoiceEntity invoice,
+        CancellationToken ct)
+    {
+        var wallet = _walletProvider.GetWallet(network);
+        if (wallet == null) return false;
+
+        var handler = _handlers.GetBitcoinHandler(network);
+        if (handler == null) return false;
+
+        var updated = new List<PaymentEntity>();
+        foreach (var payment in invoice.GetPayments(false).Where(p => p.PaymentMethodId == pmi))
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var details = handler.ParsePaymentDetails(payment.Details);
+            if (details == null)
+                continue;
+
+            var tx = await wallet.GetTransactionAsync(details.Outpoint.Hash, cancellation: ct);
+            if (tx == null)
+                continue;
+
+            var oldConfirmationCount = details.ConfirmationCount;
+            var oldRbf = details.RBF;
+            var oldStatus = payment.Status;
+
+            details.ConfirmationCount = ClampConfirmations(tx.Confirmations, network);
+            details.RBF = tx.Transaction?.RBF ?? details.RBF;
+            payment.Status = GetPaymentStatus(invoice, details);
+
+            if (oldConfirmationCount == details.ConfirmationCount &&
+                oldRbf == details.RBF &&
+                oldStatus == payment.Status)
+            {
+                continue;
+            }
+
+            payment.SetDetails(handler, details);
+            updated.Add(payment);
+        }
+
+        if (updated.Count == 0)
+            return false;
+
+        await _paymentService.UpdatePayments(updated);
+        return true;
+    }
+
+    internal static long ClampConfirmations(long confirmations, BTCPayNetwork network)
+    {
+        return Math.Min(Math.Max(confirmations, 0), network.MaxTrackedConfirmation);
+    }
+
+    private static PaymentStatus GetPaymentStatus(InvoiceEntity invoice, BitcoinLikePaymentData paymentData)
+    {
+        return IsSettled(invoice, paymentData) ? PaymentStatus.Settled : PaymentStatus.Processing;
+    }
+
+    private static int ConfirmationRequired(InvoiceEntity invoice, BitcoinLikePaymentData paymentData)
+        => (invoice, paymentData) switch
+        {
+            ({ SpeedPolicy: SpeedPolicy.HighSpeed }, { RBF: true }) => 1,
+            ({ SpeedPolicy: SpeedPolicy.HighSpeed }, _) => 0,
+            ({ SpeedPolicy: SpeedPolicy.MediumSpeed }, _) => 1,
+            ({ SpeedPolicy: SpeedPolicy.LowMediumSpeed }, _) => 2,
+            ({ SpeedPolicy: SpeedPolicy.LowSpeed }, _) => 6,
+            _ => 6
+        };
+
+    internal static bool IsSettled(InvoiceEntity invoice, BitcoinLikePaymentData paymentData)
+    {
+        return ConfirmationRequired(invoice, paymentData) <= paymentData.ConfirmationCount;
     }
 
     private async Task<bool> IsBitcoinBackendActiveAsync(CancellationToken ct)

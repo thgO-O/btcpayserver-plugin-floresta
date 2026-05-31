@@ -296,6 +296,11 @@ public class FlorestaWalletTracker
         return reservation.Address;
     }
 
+    public Task CancelReservationsAsync(string strategyStr, IEnumerable<KeyPath> keyPaths, CancellationToken ct)
+    {
+        return _addressPool.CancelReservationsAsync(strategyStr, keyPaths, ct);
+    }
+
     public async Task<UTXOChanges> GetUTXOChangesAsync(string strategyStr, CancellationToken ct)
     {
         await using var ctx = _dbFactory.CreateContext();

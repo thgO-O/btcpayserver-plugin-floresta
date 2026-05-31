@@ -7,18 +7,11 @@ using NBXplorer.DerivationStrategy;
 
 namespace BTCPayServer.Plugins.Floresta;
 
-public class FlorestaDescriptorService
+public class FlorestaDescriptorService(BTCPayNetworkProvider networkProvider)
 {
-    private readonly BTCPayNetworkProvider _networkProvider;
-
-    public FlorestaDescriptorService(BTCPayNetworkProvider networkProvider)
-    {
-        _networkProvider = networkProvider;
-    }
-
     public FlorestaDescriptorSet CreateDescriptors(string cryptoCode, string derivationStrategy)
     {
-        var network = _networkProvider.GetNetwork<BTCPayNetwork>(cryptoCode ?? "BTC")
+        var network = networkProvider.GetNetwork<BTCPayNetwork>(cryptoCode ?? "BTC")
                       ?? throw new NotSupportedException($"Unsupported crypto code for Floresta: {cryptoCode}");
         var factory = network.NBXplorerNetwork.DerivationStrategyFactory;
         var strategy = factory.Parse(derivationStrategy);
