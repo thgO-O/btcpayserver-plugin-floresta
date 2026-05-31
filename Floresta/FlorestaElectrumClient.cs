@@ -115,7 +115,8 @@ public class FlorestaElectrumClient : IAsyncDisposable
 
         _cts = new CancellationTokenSource();
         IsConnected = true;
-        _readLoop = Task.Run(() => ReadLoopAsync(_cts.Token), ct);
+        var readLoopCts = _cts;
+        _readLoop = Task.Run(() => ReadLoopAsync(readLoopCts.Token));
 
         _logger.LogInformation("Connected to Floresta Electrum endpoint {Server}", _settings.Server);
     }
@@ -124,7 +125,8 @@ public class FlorestaElectrumClient : IAsyncDisposable
     {
         _intentionalDisconnect = true;
         IsConnected = false;
-        await _cts?.CancelAsync()!;
+        if (_cts != null)
+            await _cts.CancelAsync();
 
         foreach (var kvp in _pending)
         {

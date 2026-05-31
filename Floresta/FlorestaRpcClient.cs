@@ -62,16 +62,20 @@ public class FlorestaRpcClient(
         CancellationToken ct)
     {
         var parameters = new List<object>();
-        if (startHeight is not null || stopHeight is not null || useTimestamp || !string.IsNullOrEmpty(confidence))
+        var hasCustomConfidence = !string.IsNullOrEmpty(confidence) &&
+                                  !string.Equals(confidence, "medium", StringComparison.OrdinalIgnoreCase);
+        var includeStopDependentArgs = stopHeight is not null || useTimestamp || hasCustomConfidence;
+
+        if (startHeight is not null || includeStopDependentArgs)
         {
             parameters.Add(startHeight ?? 0);
-            if (stopHeight is not null)
+            if (includeStopDependentArgs)
             {
-                parameters.Add(stopHeight.Value);
-                if (useTimestamp || !string.IsNullOrEmpty(confidence))
+                parameters.Add(stopHeight ?? 0);
+                if (useTimestamp || hasCustomConfidence)
                 {
                     parameters.Add(useTimestamp);
-                    parameters.Add(string.IsNullOrEmpty(confidence) ? "medium" : confidence);
+                    parameters.Add(hasCustomConfidence ? confidence : "medium");
                 }
             }
         }

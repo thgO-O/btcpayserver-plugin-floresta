@@ -76,7 +76,7 @@ public class FlorestaHttpHandler(
                     {
                         logger.LogError(ex, "Background tracking failed for wallet {WalletId}", LogSafeId.Hash(strategy));
                     }
-                }, cancellationToken);
+                });
                 // Return empty 200 — ExplorerClient.TrackAsync uses SendAsync<string>,
                 // which returns default(string) when ContentLength == 0.
                 // Returning JSON like {} would fail string deserialization.

@@ -316,7 +316,8 @@ public class FlorestaListener : IHostedService
             }
             else
             {
-                await UpdatePaymentStates(network, pmi, invoice, ct);
+                if (await UpdatePaymentStatesForInvoice(network, pmi, invoice, ct))
+                    _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
             }
         }
     }
@@ -402,7 +403,8 @@ public class FlorestaListener : IHostedService
                     }
                     else
                     {
-                        await UpdatePaymentStates(network, pmi, invoice, ct);
+                        if (await UpdatePaymentStatesForInvoice(network, pmi, invoice, ct))
+                            _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
                     }
                 }
             }
@@ -480,22 +482,22 @@ public class FlorestaListener : IHostedService
         var invoices = await _invoiceRepository.GetMonitoredInvoices(pmi, ct);
         foreach (var invoice in invoices)
         {
-            await UpdatePaymentStates(network, pmi, invoice, ct);
-            _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
+            if (await UpdatePaymentStatesForInvoice(network, pmi, invoice, ct))
+                _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
         }
     }
 
-    private async Task UpdatePaymentStates(
+    private async Task<bool> UpdatePaymentStatesForInvoice(
         BTCPayNetwork network,
         PaymentMethodId pmi,
         InvoiceEntity invoice,
         CancellationToken ct)
     {
         var wallet = _walletProvider.GetWallet(network);
-        if (wallet == null) return;
+        if (wallet == null) return false;
 
         var handler = _handlers.GetBitcoinHandler(network);
-        if (handler == null) return;
+        if (handler == null) return false;
 
         var updated = new List<PaymentEntity>();
         foreach (var payment in invoice.GetPayments(false).Where(p => p.PaymentMethodId == pmi))
@@ -529,8 +531,11 @@ public class FlorestaListener : IHostedService
             updated.Add(payment);
         }
 
-        if (updated.Count > 0)
-            await _paymentService.UpdatePayments(updated);
+        if (updated.Count == 0)
+            return false;
+
+        await _paymentService.UpdatePayments(updated);
+        return true;
     }
 
     internal static long ClampConfirmations(long confirmations, BTCPayNetwork network)
