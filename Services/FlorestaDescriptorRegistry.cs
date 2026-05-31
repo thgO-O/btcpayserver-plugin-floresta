@@ -3,29 +3,19 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-
 namespace BTCPayServer.Plugins.Floresta.Services;
 
-public class FlorestaDescriptorRegistry
+public class FlorestaDescriptorRegistry(
+    FlorestaDescriptorService descriptorService,
+    FlorestaRpcClient rpcClient)
 {
-    private readonly FlorestaDescriptorService _descriptorService;
-    private readonly FlorestaRpcClient _rpcClient;
-
-    public FlorestaDescriptorRegistry(
-        FlorestaDescriptorService descriptorService,
-        FlorestaRpcClient rpcClient)
-    {
-        _descriptorService = descriptorService;
-        _rpcClient = rpcClient;
-    }
-
-    public async Task<FlorestaDescriptorRegistrationResult> RegisterAsync(
+    private async Task<FlorestaDescriptorRegistrationResult> RegisterAsync(
         string cryptoCode,
         string derivationStrategy,
         IReadOnlySet<string> loadedDescriptors,
         CancellationToken ct)
     {
-        return await RegisterAsync(cryptoCode, derivationStrategy, loadedDescriptors, _rpcClient, ct);
+        return await RegisterAsync(cryptoCode, derivationStrategy, loadedDescriptors, rpcClient, ct);
     }
 
     public async Task<FlorestaDescriptorRegistrationResult> RegisterAsync(
@@ -42,10 +32,10 @@ public class FlorestaDescriptorRegistry
         try
         {
             ct.ThrowIfCancellationRequested();
-            descriptors = _descriptorService.CreateDescriptors(cryptoCode, derivationStrategy);
+            descriptors = descriptorService.CreateDescriptors(cryptoCode, derivationStrategy);
 
             var loaded = loadedDescriptors is null
-                ? (await rpcClient.ListDescriptorsAsync(ct) ?? Array.Empty<string>()).ToHashSet(StringComparer.Ordinal)
+                ? (await rpcClient.ListDescriptorsAsync(ct) ?? []).ToHashSet(StringComparer.Ordinal)
                 : loadedDescriptors.ToHashSet(StringComparer.Ordinal);
 
             foreach (var descriptor in new[] { descriptors.ReceiveDescriptor, descriptors.ChangeDescriptor })

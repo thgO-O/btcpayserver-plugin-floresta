@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Security;
@@ -116,7 +115,7 @@ public class FlorestaElectrumClient : IAsyncDisposable
 
         _cts = new CancellationTokenSource();
         IsConnected = true;
-        _readLoop = Task.Run(() => ReadLoopAsync(_cts.Token));
+        _readLoop = Task.Run(() => ReadLoopAsync(_cts.Token), ct);
 
         _logger.LogInformation("Connected to Floresta Electrum endpoint {Server}", _settings.Server);
     }
@@ -125,7 +124,7 @@ public class FlorestaElectrumClient : IAsyncDisposable
     {
         _intentionalDisconnect = true;
         IsConnected = false;
-        _cts?.Cancel();
+        await _cts?.CancelAsync()!;
 
         foreach (var kvp in _pending)
         {
@@ -153,31 +152,31 @@ public class FlorestaElectrumClient : IAsyncDisposable
     public async Task<(string serverSoftware, string protocolVersion)> ServerVersionAsync(
         string clientName, string protocolVersion, CancellationToken ct)
     {
-        var result = await SendAsync("server.version", new object[] { clientName, protocolVersion }, ct);
+        var result = await SendAsync("server.version", [clientName, protocolVersion], ct);
         var arr = result.EnumerateArray().ToArray();
         return (arr[0].GetString(), arr[1].GetString());
     }
 
     public async Task<JsonElement> ServerFeaturesAsync(CancellationToken ct)
     {
-        return await SendAsync("server.features", Array.Empty<object>(), ct);
+        return await SendAsync("server.features", [], ct);
     }
 
     public async Task PingAsync(CancellationToken ct)
     {
-        await SendAsync("server.ping", Array.Empty<object>(), ct);
+        await SendAsync("server.ping", [], ct);
     }
 
     public async Task<FlorestaElectrumHeaderNotification> HeadersSubscribeAsync(CancellationToken ct)
     {
-        var result = await SendAsync("blockchain.headers.subscribe", Array.Empty<object>(), ct);
+        var result = await SendAsync("blockchain.headers.subscribe", [], ct);
         _headersSubscribed = true;
         return ParseHeaderNotification(result);
     }
 
     public async Task<string> ScripthashSubscribeAsync(string scripthash, CancellationToken ct)
     {
-        var result = await SendAsync("blockchain.scripthash.subscribe", new object[] { scripthash }, ct);
+        var result = await SendAsync("blockchain.scripthash.subscribe", [scripthash], ct);
         var status = result.ValueKind == JsonValueKind.Null ? null : result.GetString();
         _subscribedScripthashes[scripthash] = status;
         return status;
@@ -185,13 +184,13 @@ public class FlorestaElectrumClient : IAsyncDisposable
 
     public async Task ScripthashUnsubscribeAsync(string scripthash, CancellationToken ct)
     {
-        await SendAsync("blockchain.scripthash.unsubscribe", new object[] { scripthash }, ct);
+        await SendAsync("blockchain.scripthash.unsubscribe", [scripthash], ct);
         _subscribedScripthashes.TryRemove(scripthash, out _);
     }
 
     public async Task<FlorestaElectrumHistoryItem[]> ScripthashGetHistoryAsync(string scripthash, CancellationToken ct)
     {
-        var result = await SendAsync("blockchain.scripthash.get_history", new object[] { scripthash }, ct);
+        var result = await SendAsync("blockchain.scripthash.get_history", [scripthash], ct);
         return result.EnumerateArray().Select(e => new FlorestaElectrumHistoryItem
         {
             TxHash = e.GetProperty("tx_hash").GetString(),
@@ -202,7 +201,7 @@ public class FlorestaElectrumClient : IAsyncDisposable
 
     public async Task<FlorestaElectrumUnspentItem[]> ScripthashListUnspentAsync(string scripthash, CancellationToken ct)
     {
-        var result = await SendAsync("blockchain.scripthash.listunspent", new object[] { scripthash }, ct);
+        var result = await SendAsync("blockchain.scripthash.listunspent", [scripthash], ct);
         return result.EnumerateArray().Select(e => new FlorestaElectrumUnspentItem
         {
             TxHash = e.GetProperty("tx_hash").GetString(),
@@ -214,7 +213,7 @@ public class FlorestaElectrumClient : IAsyncDisposable
 
     public async Task<FlorestaElectrumBalance> ScripthashGetBalanceAsync(string scripthash, CancellationToken ct)
     {
-        var result = await SendAsync("blockchain.scripthash.get_balance", new object[] { scripthash }, ct);
+        var result = await SendAsync("blockchain.scripthash.get_balance", [scripthash], ct);
         return new FlorestaElectrumBalance
         {
             Confirmed = GetOptionalInt64(result, "confirmed"),
@@ -224,19 +223,19 @@ public class FlorestaElectrumClient : IAsyncDisposable
 
     public async Task<string> TransactionGetAsync(string txHash, CancellationToken ct)
     {
-        var result = await SendAsync("blockchain.transaction.get", new object[] { txHash }, ct);
+        var result = await SendAsync("blockchain.transaction.get", [txHash], ct);
         return result.GetString();
     }
 
     public async Task<string> TransactionBroadcastAsync(string rawTx, CancellationToken ct)
     {
-        var result = await SendAsync("blockchain.transaction.broadcast", new object[] { rawTx }, ct);
+        var result = await SendAsync("blockchain.transaction.broadcast", [rawTx], ct);
         return result.GetString();
     }
 
     public async Task<decimal> EstimateFeeAsync(int blockTarget, CancellationToken ct)
     {
-        var result = await SendAsync("blockchain.estimatefee", new object[] { blockTarget }, ct);
+        var result = await SendAsync("blockchain.estimatefee", [blockTarget], ct);
         return result.GetDecimal();
     }
 
@@ -257,7 +256,7 @@ public class FlorestaElectrumClient : IAsyncDisposable
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
 
-        using var reg = ct.Register(() =>
+        await using var reg = ct.Register(() =>
         {
             if (_pending.TryRemove(id, out var pending))
                 pending.TrySetCanceled(ct);
@@ -353,7 +352,7 @@ public class FlorestaElectrumClient : IAsyncDisposable
             if (!_intentionalDisconnect && !ct.IsCancellationRequested)
             {
                 FailPending(new FlorestaElectrumException("Floresta Electrum connection lost."));
-                _ = Task.Run(() => ReconnectLoopAsync());
+                _ = Task.Run(ReconnectLoopAsync, ct);
             }
         }
     }
@@ -379,8 +378,11 @@ public class FlorestaElectrumClient : IAsyncDisposable
                 {
                     var scripthash = paramsArr[0].GetString();
                     var status = paramsArr[1].ValueKind == JsonValueKind.Null ? null : paramsArr[1].GetString();
-                    _subscribedScripthashes[scripthash] = status;
-                    OnScripthashNotification?.Invoke(scripthash, status);
+                    if (scripthash != null)
+                    {
+                        _subscribedScripthashes[scripthash] = status;
+                        OnScripthashNotification?.Invoke(scripthash, status);
+                    }
                 }
                 break;
             }
@@ -433,9 +435,9 @@ public class FlorestaElectrumClient : IAsyncDisposable
                     await HeadersSubscribeAsync(CancellationToken.None);
                 }
 
-                foreach (var scripthash in _subscribedScripthashes.Keys.ToArray())
+                foreach (var scriptHash in _subscribedScripthashes.Keys.ToArray())
                 {
-                    await ScripthashSubscribeAsync(scripthash, CancellationToken.None);
+                    await ScripthashSubscribeAsync(scriptHash, CancellationToken.None);
                 }
 
                 _logger.LogInformation("Reconnected to Electrum server");
@@ -473,7 +475,4 @@ public class FlorestaElectrumClient : IAsyncDisposable
     }
 }
 
-public class FlorestaElectrumException : Exception
-{
-    public FlorestaElectrumException(string message) : base(message) { }
-}
+public class FlorestaElectrumException(string message) : Exception(message);
