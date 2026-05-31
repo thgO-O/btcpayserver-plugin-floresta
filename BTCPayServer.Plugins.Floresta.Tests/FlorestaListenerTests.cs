@@ -1,5 +1,7 @@
 using System.Collections.Generic;
+using BTCPayServer.Client.Models;
 using BTCPayServer.Payments;
+using BTCPayServer.Payments.Bitcoin;
 using BTCPayServer.Plugins.Floresta.Services;
 using BTCPayServer.Services.Invoices;
 using NBitcoin;
@@ -27,6 +29,43 @@ public class FlorestaListenerTests
 
         Assert.True(FlorestaListener.InvoiceTracksScriptPubKey(invoice, pmi, network, invoiceScript));
         Assert.False(FlorestaListener.InvoiceTracksScriptPubKey(invoice, pmi, network, otherScript));
+    }
+
+    [Theory]
+    [InlineData(SpeedPolicy.HighSpeed, false, 0, true)]
+    [InlineData(SpeedPolicy.HighSpeed, true, 0, false)]
+    [InlineData(SpeedPolicy.HighSpeed, true, 1, true)]
+    [InlineData(SpeedPolicy.MediumSpeed, false, 0, false)]
+    [InlineData(SpeedPolicy.MediumSpeed, false, 1, true)]
+    [InlineData(SpeedPolicy.LowMediumSpeed, false, 1, false)]
+    [InlineData(SpeedPolicy.LowMediumSpeed, false, 2, true)]
+    [InlineData(SpeedPolicy.LowSpeed, false, 5, false)]
+    [InlineData(SpeedPolicy.LowSpeed, false, 6, true)]
+    public void PaymentSettlementMatchesBTCPayConfirmationPolicy(
+        SpeedPolicy speedPolicy,
+        bool rbf,
+        long confirmations,
+        bool expectedSettled)
+    {
+        var invoice = new InvoiceEntity { SpeedPolicy = speedPolicy };
+        var paymentData = new BitcoinLikePaymentData
+        {
+            RBF = rbf,
+            ConfirmationCount = confirmations
+        };
+
+        Assert.Equal(expectedSettled, FlorestaListener.IsSettled(invoice, paymentData));
+    }
+
+    [Fact]
+    public void ConfirmationCountIsClampedToNetworkTrackingLimit()
+    {
+        var network = CreateBitcoinNetwork();
+        network.MaxTrackedConfirmation = 3;
+
+        Assert.Equal(0, FlorestaListener.ClampConfirmations(-1, network));
+        Assert.Equal(2, FlorestaListener.ClampConfirmations(2, network));
+        Assert.Equal(3, FlorestaListener.ClampConfirmations(20, network));
     }
 
     private static BTCPayNetwork CreateBitcoinNetwork()
