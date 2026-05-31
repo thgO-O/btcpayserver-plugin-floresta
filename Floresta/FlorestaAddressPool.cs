@@ -193,6 +193,40 @@ internal sealed class FlorestaAddressPool
         return new FlorestaAddressReservation(result, addressesToSubscribe);
     }
 
+    public async Task CancelReservationsAsync(string strategyStr, IEnumerable<KeyPath> keyPaths, CancellationToken ct)
+    {
+        var keyPathStrings = keyPaths?
+            .Select(k => k.ToString())
+            .Where(k => !string.IsNullOrWhiteSpace(k))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray() ?? [];
+
+        if (keyPathStrings.Length == 0)
+            return;
+
+        await _lock.WaitAsync(ct);
+        try
+        {
+            await using var ctx = _dbFactory.CreateContext();
+            var addresses = await ctx.TrackedAddresses
+                .Where(a => a.WalletId == strategyStr &&
+                            a.IsReserved &&
+                            !a.IsUsed &&
+                            keyPathStrings.Contains(a.KeyPath))
+                .ToListAsync(ct);
+
+            foreach (var address in addresses)
+                address.IsReserved = false;
+
+            if (addresses.Count > 0)
+                await ctx.SaveChangesAsync(ct);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async Task<List<TrackedAddress>> EnsureScanAddressesAsync(
         string strategyStr,
         FlorestaSettings settings,

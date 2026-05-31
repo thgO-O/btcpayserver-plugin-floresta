@@ -4,7 +4,6 @@ using System.Threading.Tasks;
 using BTCPayServer;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Common;
-using BTCPayServer.Plugins.Floresta.Floresta;
 using BTCPayServer.Plugins.Floresta.Filters;
 using BTCPayServer.Plugins.Floresta.Services;
 using BTCPayServer.HostedServices;

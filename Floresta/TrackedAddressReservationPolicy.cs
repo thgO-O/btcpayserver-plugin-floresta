@@ -1,7 +1,7 @@
 using System;
 using BTCPayServer.Plugins.Floresta.Data;
 
-namespace BTCPayServer.Plugins.Floresta.Floresta;
+namespace BTCPayServer.Plugins.Floresta;
 
 internal static class TrackedAddressReservationPolicy
 {

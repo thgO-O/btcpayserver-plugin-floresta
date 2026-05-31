@@ -5,7 +5,7 @@ using System.Text;
 using NBitcoin;
 using NBXplorer.DerivationStrategy;
 
-namespace BTCPayServer.Plugins.Floresta.Floresta;
+namespace BTCPayServer.Plugins.Floresta;
 
 public class FlorestaDescriptorService(BTCPayNetworkProvider networkProvider)
 {
