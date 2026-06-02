@@ -107,9 +107,12 @@ public class FlorestaWalletTracker
 
             foreach (var wallet in wallets)
             {
-                var strategy = ParseStrategy(wallet.DerivationStrategy);
-                if (strategy == null) continue;
-                _trackedStrategies[wallet.Id] = strategy;
+                if (!string.IsNullOrWhiteSpace(wallet.DerivationStrategy))
+                {
+                    var strategy = ParseStrategy(wallet.DerivationStrategy);
+                    if (strategy != null)
+                        _trackedStrategies[wallet.Id] = strategy;
+                }
 
                 var addresses = await ctx.TrackedAddresses
                     .Where(a => a.WalletId == wallet.Id)
@@ -170,6 +173,68 @@ public class FlorestaWalletTracker
             addresses = await GetTrackedAddressesAsync(strategyStr, ct);
 
         return addresses;
+    }
+
+    public async Task<List<NewTransactionInfo>> TrackAddressAsync(string addressText, CancellationToken ct)
+    {
+        if (_network == null)
+            throw new InvalidOperationException("Bitcoin network is not configured.");
+
+        var address = BitcoinAddress.Create(addressText, _network);
+        var walletId = address.ToString();
+        var script = address.ScriptPubKey;
+        var scripthash = ScriptHashUtility.ComputeScriptHash(script);
+        var trackedAddress = new TrackedAddress
+        {
+            Scripthash = scripthash,
+            WalletId = walletId,
+            ScriptPubKey = script.ToBytes(),
+            Address = walletId,
+            IsChange = false,
+            IsReserved = false
+        };
+
+        await using (var ctx = _dbFactory.CreateContext())
+        {
+            var wallet = await ctx.TrackedWallets.FindAsync(new object[] { walletId }, ct);
+            if (wallet == null)
+            {
+                ctx.TrackedWallets.Add(new TrackedWallet
+                {
+                    Id = walletId,
+                    CryptoCode = "BTC",
+                    DerivationStrategy = null,
+                    ReceiveGapIndex = 0,
+                    ChangeGapIndex = 0
+                });
+            }
+
+            var existing = await ctx.TrackedAddresses.FindAsync(new object[] { scripthash }, ct);
+            if (existing == null)
+            {
+                ctx.TrackedAddresses.Add(trackedAddress);
+            }
+            else if (existing.WalletId == walletId)
+            {
+                existing.ScriptPubKey = trackedAddress.ScriptPubKey;
+                existing.Address = trackedAddress.Address;
+                trackedAddress = existing;
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Address source {Address} shares scripthash {Scripthash} with existing wallet {WalletId}; keeping existing owner",
+                    walletId,
+                    scripthash,
+                    LogSafeId.Hash(existing.WalletId));
+                trackedAddress = existing;
+            }
+
+            await ctx.SaveChangesAsync(ct);
+        }
+
+        await _walletSync.SubscribeTrackedAddressesAsync(new[] { trackedAddress }, ct);
+        return await _walletSync.SyncWalletStateAsync(trackedAddress.WalletId, new List<TrackedAddress> { trackedAddress }, ct);
     }
 
     public async Task SubscribeAndSyncWalletAsync(
@@ -736,6 +801,8 @@ public class FlorestaWalletTracker
     public class NewTransactionInfo
     {
         public string TxId { get; set; }
+        public Transaction Transaction { get; set; }
+        public TrackedSource TrackedSource { get; set; }
         public DerivationStrategyBase DerivationStrategy { get; set; }
         public int Confirmations { get; set; }
         public bool IsRbf { get; set; }
@@ -749,6 +816,7 @@ public class FlorestaWalletTracker
         public string TrackedDestination { get; set; }
         public int Index { get; set; }
         public Money Value { get; set; }
+        public Script ScriptPubKey { get; set; }
         public string KeyPath { get; set; }
         public int KeyIndex { get; set; }
     }

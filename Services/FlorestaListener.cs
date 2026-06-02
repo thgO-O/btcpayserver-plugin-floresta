@@ -15,6 +15,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
 using NBXplorer.DerivationStrategy;
+using NBXplorer.Models;
 
 namespace BTCPayServer.Plugins.Floresta.Services;
 
@@ -270,7 +271,13 @@ public class FlorestaListener : IHostedService
         FlorestaWalletTracker.NewTransactionInfo txInfo,
         BTCPayNetwork network, BTCPayWallet wallet, PaymentMethodId pmi, CancellationToken ct)
     {
-        wallet.InvalidateCache(txInfo.DerivationStrategy);
+        if (txInfo.DerivationStrategy != null)
+            wallet.InvalidateCache(txInfo.DerivationStrategy);
+
+        PublishNewOnChainTransaction(txInfo, network, pmi);
+
+        if (txInfo.DerivationStrategy == null)
+            return;
 
         foreach (var output in txInfo.Outputs)
         {
@@ -320,6 +327,53 @@ public class FlorestaListener : IHostedService
                     _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
             }
         }
+    }
+
+    private void PublishNewOnChainTransaction(
+        FlorestaWalletTracker.NewTransactionInfo txInfo,
+        BTCPayNetwork network,
+        PaymentMethodId pmi)
+    {
+        if (txInfo.TrackedSource == null || txInfo.Transaction == null)
+            return;
+
+        var txHash = uint256.Parse(txInfo.TxId);
+        var evt = new NBXplorer.Models.NewTransactionEvent
+        {
+            CryptoCode = network.CryptoCode,
+            DerivationStrategy = txInfo.DerivationStrategy,
+            TrackedSource = txInfo.TrackedSource,
+            TransactionData = new NBXplorer.Models.TransactionResult
+            {
+                TransactionHash = txHash,
+                Transaction = txInfo.Transaction,
+                Confirmations = txInfo.Confirmations,
+                Height = 0,
+                Timestamp = txInfo.SeenAt
+            },
+            Outputs = txInfo.Outputs.Select(output => new MatchedOutput
+            {
+                Address = string.IsNullOrWhiteSpace(output.Address)
+                    ? output.ScriptPubKey?.GetDestinationAddress(network.NBitcoinNetwork)
+                    : BitcoinAddress.Create(output.Address, network.NBitcoinNetwork),
+                ScriptPubKey = output.ScriptPubKey,
+                Index = output.Index,
+                Value = output.Value,
+                KeyPath = string.IsNullOrWhiteSpace(output.KeyPath) ? null : KeyPath.Parse(output.KeyPath),
+                KeyIndex = output.KeyIndex,
+                Feature = output.KeyPath?.StartsWith("1/", StringComparison.Ordinal) == true
+                    ? DerivationFeature.Change
+                    : string.IsNullOrWhiteSpace(output.KeyPath)
+                        ? null
+                        : DerivationFeature.Deposit
+            }).ToList()
+        };
+
+        _eventAggregator.Publish(new NewOnChainTransactionEvent
+        {
+            PaymentMethodId = pmi,
+            NewTransactionEvent = evt
+        });
     }
 
     private async Task FindPaymentsViaPolling(CancellationToken ct)

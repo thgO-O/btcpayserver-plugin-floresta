@@ -84,6 +84,15 @@ public class FlorestaHttpHandler(
 
             }
 
+            // POST /v1/cryptos/{code}/addresses/{address} — Track address source
+            if (method == HttpMethod.Post && Regex.IsMatch(path, @"/v1/cryptos/\w+/addresses/[^/]+$"))
+            {
+                var address = ExtractAddress(path);
+                if (address == null) return NotFoundResponse();
+                await tracker.TrackAddressAsync(address, cancellationToken);
+                return new HttpResponseMessage(HttpStatusCode.OK);
+            }
+
             // GET /v1/cryptos/{code}/derivations/{strategy}/addresses/unused — GetUnused
             if (method == HttpMethod.Get && path.Contains("/addresses/unused"))
             {
@@ -281,6 +290,12 @@ public class FlorestaHttpHandler(
     {
         var match = Regex.Match(path, @"/v1/cryptos/(\w+)/");
         return match.Success ? match.Groups[1].Value : null;
+    }
+
+    private string ExtractAddress(string path)
+    {
+        var match = Regex.Match(path, @"/addresses/([^/]+)$");
+        return match.Success ? Uri.UnescapeDataString(match.Groups[1].Value) : null;
     }
 
     private string ExtractMetadataKey(string path)
