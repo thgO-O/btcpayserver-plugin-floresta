@@ -276,12 +276,12 @@ internal sealed class FlorestaWalletSync
 
         if (!syncHadErrors && addresses.Count > 0)
         {
-            var demotedCount = await DemoteTransactionsMissingFromHistoryAsync(ctx, walletId, observedHistoryTxids, ct);
-            if (demotedCount > 0)
+            var removedCount = await MarkTransactionsMissingFromHistoryAsync(ctx, walletId, observedHistoryTxids, ct);
+            if (removedCount > 0)
             {
                 _logger.LogInformation(
-                    "Demoted {TransactionCount} cached Floresta transactions missing from wallet history for wallet {WalletId}",
-                    demotedCount,
+                    "Marked {TransactionCount} cached Floresta transactions missing from wallet history as removed for wallet {WalletId}",
+                    removedCount,
                     LogSafeId.Hash(walletId));
             }
         }
@@ -439,35 +439,36 @@ internal sealed class FlorestaWalletSync
         var blockHeight = historyHeight > 0 ? historyHeight : (long?)null;
         if (transaction.BlockHeight != blockHeight)
             transaction.BlockHeight = blockHeight;
+        transaction.RemovedAt = null;
     }
 
-    internal static int DemoteTransactionsMissingFromHistory(
+    internal static int MarkTransactionsMissingFromHistory(
         IEnumerable<TrackedTransaction> transactions,
         IReadOnlySet<string> observedHistoryTxids)
     {
-        var demoted = 0;
+        var removed = 0;
         foreach (var transaction in transactions)
         {
-            if (transaction.BlockHeight is null || observedHistoryTxids.Contains(transaction.Txid))
+            if (observedHistoryTxids.Contains(transaction.Txid) || transaction.RemovedAt is not null)
                 continue;
 
-            transaction.BlockHeight = null;
-            demoted++;
+            transaction.RemovedAt = DateTimeOffset.UtcNow;
+            removed++;
         }
 
-        return demoted;
+        return removed;
     }
 
-    private static async Task<int> DemoteTransactionsMissingFromHistoryAsync(
+    private static async Task<int> MarkTransactionsMissingFromHistoryAsync(
         FlorestaDbContext ctx,
         string walletId,
         IReadOnlySet<string> observedHistoryTxids,
         CancellationToken ct)
     {
-        var confirmedTransactions = await ctx.Transactions
-            .Where(t => t.WalletId == walletId && t.BlockHeight != null)
+        var activeTransactions = await ctx.Transactions
+            .Where(t => t.WalletId == walletId && t.RemovedAt == null)
             .ToListAsync(ct);
-        return DemoteTransactionsMissingFromHistory(confirmedTransactions, observedHistoryTxids);
+        return MarkTransactionsMissingFromHistory(activeTransactions, observedHistoryTxids);
     }
 
     private sealed class ByteArrayComparer : IEqualityComparer<byte[]>

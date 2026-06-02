@@ -93,6 +93,9 @@ namespace BTCPayServer.Plugins.Floresta.Migrations
                 b.Property<byte[]>("RawTx")
                     .HasColumnType("bytea");
 
+                b.Property<DateTimeOffset?>("RemovedAt")
+                    .HasColumnType("timestamp with time zone");
+
                 b.Property<DateTimeOffset>("SeenAt")
                     .HasColumnType("timestamp with time zone");
 

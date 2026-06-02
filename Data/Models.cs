@@ -61,6 +61,7 @@ public class TrackedTransaction
     public long? Fee { get; set; }
     public DateTimeOffset SeenAt { get; set; } = DateTimeOffset.UtcNow;
     public long BalanceChange { get; set; }
+    public DateTimeOffset? RemovedAt { get; set; }
 
     public TrackedWallet Wallet { get; set; }
 }

@@ -63,7 +63,7 @@ public class FlorestaListenerTests
         var network = CreateBitcoinNetwork();
         network.MaxTrackedConfirmation = 3;
 
-        Assert.Equal(0, FlorestaListener.ClampConfirmations(-1, network));
+        Assert.Equal(-1, FlorestaListener.ClampConfirmations(-1, network));
         Assert.Equal(2, FlorestaListener.ClampConfirmations(2, network));
         Assert.Equal(3, FlorestaListener.ClampConfirmations(20, network));
     }

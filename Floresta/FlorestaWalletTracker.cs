@@ -480,7 +480,7 @@ public class FlorestaWalletTracker
         }
 
         var transaction = tx.RawTx != null ? Transaction.Load(tx.RawTx, _network) : null;
-        var confirmations = GetConfirmations(tx.BlockHeight, Volatile.Read(ref _tipHeight));
+        var confirmations = GetTransactionConfirmations(tx, Volatile.Read(ref _tipHeight));
 
         return new TransactionResult
         {
@@ -503,7 +503,7 @@ public class FlorestaWalletTracker
         if (tx == null) return null;
 
         var transaction = tx.RawTx != null ? Transaction.Load(tx.RawTx, _network) : null;
-        var confirmations = GetConfirmations(tx.BlockHeight, Volatile.Read(ref _tipHeight));
+        var confirmations = GetTransactionConfirmations(tx, Volatile.Read(ref _tipHeight));
 
         return new TransactionInformation
         {
@@ -528,24 +528,16 @@ public class FlorestaWalletTracker
 
         var confirmed = new List<TransactionInformation>();
         var unconfirmed = new List<TransactionInformation>();
+        var replaced = new List<TransactionInformation>();
         var tipHeight = Volatile.Read(ref _tipHeight);
 
         foreach (var tx in txs)
         {
-            var transaction = tx.RawTx != null ? Transaction.Load(tx.RawTx, _network) : null;
-            var confirmations = GetConfirmations(tx.BlockHeight, tipHeight);
+            var info = CreateTransactionInformation(tx, tipHeight);
 
-            var info = new TransactionInformation
-            {
-                TransactionId = uint256.Parse(tx.Txid),
-                Transaction = transaction,
-                Confirmations = confirmations,
-                Height = GetConfirmedHeight(tx.BlockHeight, confirmations),
-                Timestamp = tx.SeenAt,
-                BalanceChange = Money.Satoshis(tx.BalanceChange)
-            };
-
-            if (confirmations > 0)
+            if (info.Confirmations == -1)
+                replaced.Add(info);
+            else if (info.Confirmations > 0)
                 confirmed.Add(info);
             else
                 unconfirmed.Add(info);
@@ -556,7 +548,7 @@ public class FlorestaWalletTracker
             Height = tipHeight,
             ConfirmedTransactions = new TransactionInformationSet { Transactions = confirmed },
             UnconfirmedTransactions = new TransactionInformationSet { Transactions = unconfirmed },
-            ReplacedTransactions = new TransactionInformationSet { Transactions = new List<TransactionInformation>() }
+            ReplacedTransactions = new TransactionInformationSet { Transactions = replaced }
         };
     }
 
@@ -781,9 +773,28 @@ public class FlorestaWalletTracker
         return Math.Max(0, tipHeight - (int)blockHeight.Value + 1);
     }
 
+    internal static int GetTransactionConfirmations(TrackedTransaction transaction, int tipHeight)
+    {
+        return transaction.RemovedAt is not null ? -1 : GetConfirmations(transaction.BlockHeight, tipHeight);
+    }
+
     internal static int GetConfirmedHeight(long? blockHeight, int confirmations)
     {
         return confirmations > 0 && blockHeight is > 0 ? (int)blockHeight.Value : 0;
+    }
+
+    private TransactionInformation CreateTransactionInformation(TrackedTransaction tx, int tipHeight)
+    {
+        var confirmations = GetTransactionConfirmations(tx, tipHeight);
+        return new TransactionInformation
+        {
+            TransactionId = uint256.Parse(tx.Txid),
+            Transaction = tx.RawTx != null ? Transaction.Load(tx.RawTx, _network) : null,
+            Confirmations = confirmations,
+            Height = GetConfirmedHeight(tx.BlockHeight, confirmations),
+            Timestamp = tx.SeenAt,
+            BalanceChange = Money.Satoshis(tx.BalanceChange)
+        };
     }
 
     internal static FlorestaElectrumUnspentItem NormalizeUtxoPosition(

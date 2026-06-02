@@ -594,11 +594,17 @@ public class FlorestaListener : IHostedService
 
     internal static long ClampConfirmations(long confirmations, BTCPayNetwork network)
     {
+        if (confirmations < 0)
+            return confirmations;
+
         return Math.Min(Math.Max(confirmations, 0), network.MaxTrackedConfirmation);
     }
 
     private static PaymentStatus GetPaymentStatus(InvoiceEntity invoice, BitcoinLikePaymentData paymentData)
     {
+        if (paymentData.ConfirmationCount < 0)
+            return PaymentStatus.Unaccounted;
+
         return IsSettled(invoice, paymentData) ? PaymentStatus.Settled : PaymentStatus.Processing;
     }
 
