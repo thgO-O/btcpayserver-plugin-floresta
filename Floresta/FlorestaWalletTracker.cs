@@ -114,9 +114,7 @@ public class FlorestaWalletTracker
                         _trackedStrategies[wallet.Id] = strategy;
                 }
 
-                var addresses = await ctx.TrackedAddresses
-                    .Where(a => a.WalletId == wallet.Id)
-                    .ToListAsync(ct);
+                var addresses = await GetTrackedAddressSourcesAsync(ctx, wallet.Id, ct);
                 walletsToSubscribe.Add((wallet.Id, addresses));
             }
 
@@ -209,28 +207,38 @@ public class FlorestaWalletTracker
                 });
             }
 
-            var existing = await ctx.TrackedAddresses.FindAsync(new object[] { scripthash }, ct);
-            if (existing == null)
+            var trackedScript = await ctx.TrackedAddresses.FindAsync(new object[] { scripthash }, ct);
+            if (trackedScript == null)
             {
                 ctx.TrackedAddresses.Add(trackedAddress);
+                trackedScript = trackedAddress;
             }
-            else if (existing.WalletId == walletId)
+            else if (trackedScript.WalletId == walletId)
             {
-                existing.ScriptPubKey = trackedAddress.ScriptPubKey;
-                existing.Address = trackedAddress.Address;
-                trackedAddress = existing;
+                trackedScript.ScriptPubKey = trackedAddress.ScriptPubKey;
+                trackedScript.Address = trackedAddress.Address;
             }
             else
             {
                 _logger.LogWarning(
-                    "Address source {Address} shares scripthash {Scripthash} with existing wallet {WalletId}; keeping existing owner",
+                    "Address source {Address} shares scripthash {Scripthash} with existing wallet {WalletId}; linking an additional owner",
                     walletId,
                     scripthash,
-                    LogSafeId.Hash(existing.WalletId));
-                trackedAddress = existing;
+                    LogSafeId.Hash(trackedScript.WalletId));
+            }
+
+            var owner = await ctx.TrackedAddressOwners.FindAsync(new object[] { walletId, scripthash }, ct);
+            if (owner == null)
+            {
+                ctx.TrackedAddressOwners.Add(new TrackedAddressOwner
+                {
+                    WalletId = walletId,
+                    Scripthash = scripthash
+                });
             }
 
             await ctx.SaveChangesAsync(ct);
+            trackedAddress = CreateAddressSource(trackedScript, walletId);
         }
 
         await _walletSync.SubscribeTrackedAddressesAsync(new[] { trackedAddress }, ct);
@@ -252,9 +260,104 @@ public class FlorestaWalletTracker
     private async Task<List<TrackedAddress>> GetTrackedAddressesAsync(string strategyStr, CancellationToken ct)
     {
         await using var ctx = _dbFactory.CreateContext();
-        return await ctx.TrackedAddresses
-            .Where(a => a.WalletId == strategyStr)
+        return await GetTrackedAddressSourcesAsync(ctx, strategyStr, ct);
+    }
+
+    internal static async Task<List<TrackedAddress>> GetTrackedAddressSourcesAsync(
+        FlorestaDbContext ctx,
+        string walletId,
+        CancellationToken ct)
+    {
+        var primary = await ctx.TrackedAddresses
+            .Where(a => a.WalletId == walletId)
             .ToListAsync(ct);
+
+        var owned = await ctx.TrackedAddressOwners
+            .Where(o => o.WalletId == walletId)
+            .Join(
+                ctx.TrackedAddresses,
+                owner => owner.Scripthash,
+                address => address.Scripthash,
+                (_, address) => address)
+            .ToListAsync(ct);
+
+        return primary
+            .Concat(owned.Select(a => CreateAddressSource(a, walletId)))
+            .GroupBy(a => a.Scripthash)
+            .Select(g => g.First())
+            .ToList();
+    }
+
+    internal static async Task<List<TrackedAddress>> GetTrackedAddressSourcesByScripthashAsync(
+        FlorestaDbContext ctx,
+        string scripthash,
+        CancellationToken ct)
+    {
+        var address = await ctx.TrackedAddresses.FindAsync(new object[] { scripthash }, ct);
+        if (address == null)
+            return new List<TrackedAddress>();
+
+        var sources = new List<TrackedAddress> { address };
+        var ownerWalletIds = await ctx.TrackedAddressOwners
+            .Where(o => o.Scripthash == scripthash)
+            .Select(o => o.WalletId)
+            .ToListAsync(ct);
+
+        foreach (var walletId in ownerWalletIds)
+        {
+            if (walletId == address.WalletId)
+                continue;
+
+            sources.Add(CreateAddressSource(address, walletId));
+        }
+
+        return sources
+            .GroupBy(a => a.WalletId)
+            .Select(g => g.First())
+            .ToList();
+    }
+
+    internal static async Task<List<TrackedAddress>> GetAllTrackedAddressSourcesAsync(
+        FlorestaDbContext ctx,
+        CancellationToken ct)
+    {
+        var primary = await ctx.TrackedAddresses
+            .AsNoTracking()
+            .ToListAsync(ct);
+        var byScripthash = primary.ToDictionary(a => a.Scripthash);
+        var sources = new List<TrackedAddress>(primary);
+
+        var owners = await ctx.TrackedAddressOwners
+            .AsNoTracking()
+            .ToListAsync(ct);
+        foreach (var owner in owners)
+        {
+            if (byScripthash.TryGetValue(owner.Scripthash, out var address))
+                sources.Add(CreateAddressSource(address, owner.WalletId));
+        }
+
+        return sources
+            .GroupBy(a => new { a.WalletId, a.Scripthash })
+            .Select(g => g.First())
+            .ToList();
+    }
+
+    internal static TrackedAddress CreateAddressSource(TrackedAddress address, string walletId)
+    {
+        if (address.WalletId == walletId)
+            return address;
+
+        return new TrackedAddress
+        {
+            Scripthash = address.Scripthash,
+            WalletId = walletId,
+            KeyPath = null,
+            ScriptPubKey = address.ScriptPubKey,
+            Address = address.Address,
+            IsChange = false,
+            IsReserved = false,
+            IsUsed = address.IsUsed
+        };
     }
 
     private async Task<FlorestaDescriptorRegistrationResult> PrepareDescriptorRegistrationAsync(

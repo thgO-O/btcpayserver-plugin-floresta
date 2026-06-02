@@ -70,6 +70,24 @@ namespace BTCPayServer.Plugins.Floresta.Migrations
                 b.ToTable("tracked_addresses", "floresta");
             });
 
+            modelBuilder.Entity("BTCPayServer.Plugins.Floresta.Data.TrackedAddressOwner", b =>
+            {
+                b.Property<string>("WalletId")
+                    .HasColumnType("text");
+
+                b.Property<string>("Scripthash")
+                    .HasColumnType("text");
+
+                b.Property<DateTimeOffset>("CreatedAt")
+                    .HasColumnType("timestamp with time zone");
+
+                b.HasKey("WalletId", "Scripthash");
+
+                b.HasIndex("Scripthash");
+
+                b.ToTable("tracked_address_owners", "floresta");
+            });
+
             modelBuilder.Entity("BTCPayServer.Plugins.Floresta.Data.TrackedTransaction", b =>
             {
                 b.Property<string>("Txid")
@@ -203,6 +221,25 @@ namespace BTCPayServer.Plugins.Floresta.Migrations
                 b.HasOne("BTCPayServer.Plugins.Floresta.Data.TrackedWallet", "Wallet")
                     .WithMany()
                     .HasForeignKey("WalletId");
+
+                b.Navigation("Wallet");
+            });
+
+            modelBuilder.Entity("BTCPayServer.Plugins.Floresta.Data.TrackedAddressOwner", b =>
+            {
+                b.HasOne("BTCPayServer.Plugins.Floresta.Data.TrackedAddress", "TrackedAddress")
+                    .WithMany()
+                    .HasForeignKey("Scripthash")
+                    .OnDelete(DeleteBehavior.Cascade)
+                    .IsRequired();
+
+                b.HasOne("BTCPayServer.Plugins.Floresta.Data.TrackedWallet", "Wallet")
+                    .WithMany()
+                    .HasForeignKey("WalletId")
+                    .OnDelete(DeleteBehavior.Cascade)
+                    .IsRequired();
+
+                b.Navigation("TrackedAddress");
 
                 b.Navigation("Wallet");
             });

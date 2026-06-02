@@ -6,6 +6,7 @@ public class FlorestaDbContext(DbContextOptions<FlorestaDbContext> options) : Db
 {
     public DbSet<TrackedWallet> TrackedWallets { get; set; }
     public DbSet<TrackedAddress> TrackedAddresses { get; set; }
+    public DbSet<TrackedAddressOwner> TrackedAddressOwners { get; set; }
     public DbSet<TrackedUtxo> Utxos { get; set; }
     public DbSet<TrackedTransaction> Transactions { get; set; }
     public DbSet<SyncState> SyncStates { get; set; }
@@ -27,6 +28,15 @@ public class FlorestaDbContext(DbContextOptions<FlorestaDbContext> options) : Db
             b.ToTable("tracked_addresses");
             b.HasOne(e => e.Wallet).WithMany().HasForeignKey(e => e.WalletId);
             b.HasIndex(e => e.WalletId);
+        });
+
+        modelBuilder.Entity<TrackedAddressOwner>(b =>
+        {
+            b.HasKey(e => new { e.WalletId, e.Scripthash });
+            b.ToTable("tracked_address_owners");
+            b.HasOne(e => e.Wallet).WithMany().HasForeignKey(e => e.WalletId);
+            b.HasOne(e => e.TrackedAddress).WithMany().HasForeignKey(e => e.Scripthash);
+            b.HasIndex(e => e.Scripthash);
         });
 
         modelBuilder.Entity<TrackedUtxo>(b =>
