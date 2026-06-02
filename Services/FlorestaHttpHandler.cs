@@ -165,7 +165,8 @@ public class FlorestaHttpHandler(
                 var body = request.Content is null
                     ? []
                     : await request.Content.ReadAsByteArrayAsync(cancellationToken);
-                var result = await tracker.BroadcastAsync(body, cancellationToken);
+                var testMempoolAccept = ExtractQueryBool(request.RequestUri?.Query ?? "", "testMempoolAccept");
+                var result = await tracker.BroadcastAsync(body, testMempoolAccept, cancellationToken);
                 return OkResponse(result);
             }
 
@@ -292,6 +293,14 @@ public class FlorestaHttpHandler(
     {
         var match = Regex.Match(query, $@"[?&]{key}=(\d+)", RegexOptions.IgnoreCase);
         return match.Success && int.TryParse(match.Groups[1].Value, out var val) ? val : null;
+    }
+
+    private bool ExtractQueryBool(string query, string key)
+    {
+        var match = Regex.Match(query, $@"[?&]{key}=([^&]+)", RegexOptions.IgnoreCase);
+        return match.Success &&
+               bool.TryParse(Uri.UnescapeDataString(match.Groups[1].Value), out var value) &&
+               value;
     }
 
     private string ExtractTxId(string path)

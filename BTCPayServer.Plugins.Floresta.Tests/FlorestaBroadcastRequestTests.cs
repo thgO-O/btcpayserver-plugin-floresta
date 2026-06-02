@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using NBitcoin;
+using NBitcoin.RPC;
 using NBXplorer;
 using Xunit;
 
@@ -67,6 +68,21 @@ public class FlorestaBroadcastRequestTests
 
         Assert.True(extracted, $"Payload was: {handler.Body}. Error: {error}");
         Assert.Equal(RawTransactionHex, rawTx);
+    }
+
+    [Fact]
+    public async Task TestMempoolAcceptDoesNotBroadcastTransaction()
+    {
+        var broadcaster = new FlorestaTransactionBroadcaster(null!, null!);
+
+        var result = await broadcaster.BroadcastAsync(
+            Encoding.UTF8.GetBytes(RawTransactionHex),
+            testMempoolAccept: true,
+            CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal(RPCErrorCode.RPC_METHOD_NOT_FOUND, result.RPCCode);
+        Assert.Contains("cannot validate mempool acceptance", result.RPCMessage);
     }
 
     private sealed class RecordingBroadcastHandler : HttpMessageHandler

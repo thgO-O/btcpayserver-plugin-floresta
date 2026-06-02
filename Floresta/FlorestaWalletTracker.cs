@@ -500,9 +500,19 @@ public class FlorestaWalletTracker
         return await _broadcaster.BroadcastAsync(body, ct);
     }
 
+    public async Task<BroadcastResult> BroadcastAsync(string body, bool testMempoolAccept, CancellationToken ct)
+    {
+        return await _broadcaster.BroadcastAsync(body, testMempoolAccept, ct);
+    }
+
     public async Task<BroadcastResult> BroadcastAsync(byte[] body, CancellationToken ct)
     {
         return await _broadcaster.BroadcastAsync(body, ct);
+    }
+
+    public async Task<BroadcastResult> BroadcastAsync(byte[] body, bool testMempoolAccept, CancellationToken ct)
+    {
+        return await _broadcaster.BroadcastAsync(body, testMempoolAccept, ct);
     }
 
     internal static bool TryExtractRawTransactionHex(string body, out string rawTx, out string error)
