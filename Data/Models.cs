@@ -31,6 +31,16 @@ public class TrackedAddress
     public TrackedWallet Wallet { get; set; }
 }
 
+public class TrackedAddressOwner
+{
+    public string WalletId { get; set; }
+    public string Scripthash { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public TrackedWallet Wallet { get; set; }
+    public TrackedAddress TrackedAddress { get; set; }
+}
+
 public class TrackedUtxo
 {
     public string Outpoint { get; set; }
@@ -61,6 +71,7 @@ public class TrackedTransaction
     public long? Fee { get; set; }
     public DateTimeOffset SeenAt { get; set; } = DateTimeOffset.UtcNow;
     public long BalanceChange { get; set; }
+    public DateTimeOffset? RemovedAt { get; set; }
 
     public TrackedWallet Wallet { get; set; }
 }

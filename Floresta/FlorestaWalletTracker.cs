@@ -107,13 +107,14 @@ public class FlorestaWalletTracker
 
             foreach (var wallet in wallets)
             {
-                var strategy = ParseStrategy(wallet.DerivationStrategy);
-                if (strategy == null) continue;
-                _trackedStrategies[wallet.Id] = strategy;
+                if (!string.IsNullOrWhiteSpace(wallet.DerivationStrategy))
+                {
+                    var strategy = ParseStrategy(wallet.DerivationStrategy);
+                    if (strategy != null)
+                        _trackedStrategies[wallet.Id] = strategy;
+                }
 
-                var addresses = await ctx.TrackedAddresses
-                    .Where(a => a.WalletId == wallet.Id)
-                    .ToListAsync(ct);
+                var addresses = await GetTrackedAddressSourcesAsync(ctx, wallet.Id, ct);
                 walletsToSubscribe.Add((wallet.Id, addresses));
             }
 
@@ -172,6 +173,78 @@ public class FlorestaWalletTracker
         return addresses;
     }
 
+    public async Task<List<NewTransactionInfo>> TrackAddressAsync(string addressText, CancellationToken ct)
+    {
+        if (_network == null)
+            throw new InvalidOperationException("Bitcoin network is not configured.");
+
+        var address = BitcoinAddress.Create(addressText, _network);
+        var walletId = address.ToString();
+        var script = address.ScriptPubKey;
+        var scripthash = ScriptHashUtility.ComputeScriptHash(script);
+        var trackedAddress = new TrackedAddress
+        {
+            Scripthash = scripthash,
+            WalletId = walletId,
+            ScriptPubKey = script.ToBytes(),
+            Address = walletId,
+            IsChange = false,
+            IsReserved = false
+        };
+
+        await using (var ctx = _dbFactory.CreateContext())
+        {
+            var wallet = await ctx.TrackedWallets.FindAsync(new object[] { walletId }, ct);
+            if (wallet == null)
+            {
+                ctx.TrackedWallets.Add(new TrackedWallet
+                {
+                    Id = walletId,
+                    CryptoCode = "BTC",
+                    DerivationStrategy = null,
+                    ReceiveGapIndex = 0,
+                    ChangeGapIndex = 0
+                });
+            }
+
+            var trackedScript = await ctx.TrackedAddresses.FindAsync(new object[] { scripthash }, ct);
+            if (trackedScript == null)
+            {
+                ctx.TrackedAddresses.Add(trackedAddress);
+                trackedScript = trackedAddress;
+            }
+            else if (trackedScript.WalletId == walletId)
+            {
+                trackedScript.ScriptPubKey = trackedAddress.ScriptPubKey;
+                trackedScript.Address = trackedAddress.Address;
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Address source {Address} shares scripthash {Scripthash} with existing wallet {WalletId}; linking an additional owner",
+                    walletId,
+                    scripthash,
+                    LogSafeId.Hash(trackedScript.WalletId));
+            }
+
+            var owner = await ctx.TrackedAddressOwners.FindAsync(new object[] { walletId, scripthash }, ct);
+            if (owner == null)
+            {
+                ctx.TrackedAddressOwners.Add(new TrackedAddressOwner
+                {
+                    WalletId = walletId,
+                    Scripthash = scripthash
+                });
+            }
+
+            await ctx.SaveChangesAsync(ct);
+            trackedAddress = CreateAddressSource(trackedScript, walletId);
+        }
+
+        await _walletSync.SubscribeTrackedAddressesAsync(new[] { trackedAddress }, ct);
+        return await _walletSync.SyncWalletStateAsync(trackedAddress.WalletId, new List<TrackedAddress> { trackedAddress }, ct);
+    }
+
     public async Task SubscribeAndSyncWalletAsync(
         string strategyStr,
         List<TrackedAddress> addresses,
@@ -187,9 +260,104 @@ public class FlorestaWalletTracker
     private async Task<List<TrackedAddress>> GetTrackedAddressesAsync(string strategyStr, CancellationToken ct)
     {
         await using var ctx = _dbFactory.CreateContext();
-        return await ctx.TrackedAddresses
-            .Where(a => a.WalletId == strategyStr)
+        return await GetTrackedAddressSourcesAsync(ctx, strategyStr, ct);
+    }
+
+    internal static async Task<List<TrackedAddress>> GetTrackedAddressSourcesAsync(
+        FlorestaDbContext ctx,
+        string walletId,
+        CancellationToken ct)
+    {
+        var primary = await ctx.TrackedAddresses
+            .Where(a => a.WalletId == walletId)
             .ToListAsync(ct);
+
+        var owned = await ctx.TrackedAddressOwners
+            .Where(o => o.WalletId == walletId)
+            .Join(
+                ctx.TrackedAddresses,
+                owner => owner.Scripthash,
+                address => address.Scripthash,
+                (_, address) => address)
+            .ToListAsync(ct);
+
+        return primary
+            .Concat(owned.Select(a => CreateAddressSource(a, walletId)))
+            .GroupBy(a => a.Scripthash)
+            .Select(g => g.First())
+            .ToList();
+    }
+
+    internal static async Task<List<TrackedAddress>> GetTrackedAddressSourcesByScripthashAsync(
+        FlorestaDbContext ctx,
+        string scripthash,
+        CancellationToken ct)
+    {
+        var address = await ctx.TrackedAddresses.FindAsync(new object[] { scripthash }, ct);
+        if (address == null)
+            return new List<TrackedAddress>();
+
+        var sources = new List<TrackedAddress> { address };
+        var ownerWalletIds = await ctx.TrackedAddressOwners
+            .Where(o => o.Scripthash == scripthash)
+            .Select(o => o.WalletId)
+            .ToListAsync(ct);
+
+        foreach (var walletId in ownerWalletIds)
+        {
+            if (walletId == address.WalletId)
+                continue;
+
+            sources.Add(CreateAddressSource(address, walletId));
+        }
+
+        return sources
+            .GroupBy(a => a.WalletId)
+            .Select(g => g.First())
+            .ToList();
+    }
+
+    internal static async Task<List<TrackedAddress>> GetAllTrackedAddressSourcesAsync(
+        FlorestaDbContext ctx,
+        CancellationToken ct)
+    {
+        var primary = await ctx.TrackedAddresses
+            .AsNoTracking()
+            .ToListAsync(ct);
+        var byScripthash = primary.ToDictionary(a => a.Scripthash);
+        var sources = new List<TrackedAddress>(primary);
+
+        var owners = await ctx.TrackedAddressOwners
+            .AsNoTracking()
+            .ToListAsync(ct);
+        foreach (var owner in owners)
+        {
+            if (byScripthash.TryGetValue(owner.Scripthash, out var address))
+                sources.Add(CreateAddressSource(address, owner.WalletId));
+        }
+
+        return sources
+            .GroupBy(a => new { a.WalletId, a.Scripthash })
+            .Select(g => g.First())
+            .ToList();
+    }
+
+    internal static TrackedAddress CreateAddressSource(TrackedAddress address, string walletId)
+    {
+        if (address.WalletId == walletId)
+            return address;
+
+        return new TrackedAddress
+        {
+            Scripthash = address.Scripthash,
+            WalletId = walletId,
+            KeyPath = null,
+            ScriptPubKey = address.ScriptPubKey,
+            Address = address.Address,
+            IsChange = false,
+            IsReserved = false,
+            IsUsed = address.IsUsed
+        };
     }
 
     private async Task<FlorestaDescriptorRegistrationResult> PrepareDescriptorRegistrationAsync(
@@ -415,7 +583,7 @@ public class FlorestaWalletTracker
         }
 
         var transaction = tx.RawTx != null ? Transaction.Load(tx.RawTx, _network) : null;
-        var confirmations = GetConfirmations(tx.BlockHeight, Volatile.Read(ref _tipHeight));
+        var confirmations = GetTransactionConfirmations(tx, Volatile.Read(ref _tipHeight));
 
         return new TransactionResult
         {
@@ -438,7 +606,7 @@ public class FlorestaWalletTracker
         if (tx == null) return null;
 
         var transaction = tx.RawTx != null ? Transaction.Load(tx.RawTx, _network) : null;
-        var confirmations = GetConfirmations(tx.BlockHeight, Volatile.Read(ref _tipHeight));
+        var confirmations = GetTransactionConfirmations(tx, Volatile.Read(ref _tipHeight));
 
         return new TransactionInformation
         {
@@ -463,24 +631,16 @@ public class FlorestaWalletTracker
 
         var confirmed = new List<TransactionInformation>();
         var unconfirmed = new List<TransactionInformation>();
+        var replaced = new List<TransactionInformation>();
         var tipHeight = Volatile.Read(ref _tipHeight);
 
         foreach (var tx in txs)
         {
-            var transaction = tx.RawTx != null ? Transaction.Load(tx.RawTx, _network) : null;
-            var confirmations = GetConfirmations(tx.BlockHeight, tipHeight);
+            var info = CreateTransactionInformation(tx, tipHeight);
 
-            var info = new TransactionInformation
-            {
-                TransactionId = uint256.Parse(tx.Txid),
-                Transaction = transaction,
-                Confirmations = confirmations,
-                Height = GetConfirmedHeight(tx.BlockHeight, confirmations),
-                Timestamp = tx.SeenAt,
-                BalanceChange = Money.Satoshis(tx.BalanceChange)
-            };
-
-            if (confirmations > 0)
+            if (info.Confirmations == -1)
+                replaced.Add(info);
+            else if (info.Confirmations > 0)
                 confirmed.Add(info);
             else
                 unconfirmed.Add(info);
@@ -491,7 +651,7 @@ public class FlorestaWalletTracker
             Height = tipHeight,
             ConfirmedTransactions = new TransactionInformationSet { Transactions = confirmed },
             UnconfirmedTransactions = new TransactionInformationSet { Transactions = unconfirmed },
-            ReplacedTransactions = new TransactionInformationSet { Transactions = new List<TransactionInformation>() }
+            ReplacedTransactions = new TransactionInformationSet { Transactions = replaced }
         };
     }
 
@@ -500,9 +660,19 @@ public class FlorestaWalletTracker
         return await _broadcaster.BroadcastAsync(body, ct);
     }
 
+    public async Task<BroadcastResult> BroadcastAsync(string body, bool testMempoolAccept, CancellationToken ct)
+    {
+        return await _broadcaster.BroadcastAsync(body, testMempoolAccept, ct);
+    }
+
     public async Task<BroadcastResult> BroadcastAsync(byte[] body, CancellationToken ct)
     {
         return await _broadcaster.BroadcastAsync(body, ct);
+    }
+
+    public async Task<BroadcastResult> BroadcastAsync(byte[] body, bool testMempoolAccept, CancellationToken ct)
+    {
+        return await _broadcaster.BroadcastAsync(body, testMempoolAccept, ct);
     }
 
     internal static bool TryExtractRawTransactionHex(string body, out string rawTx, out string error)
@@ -706,9 +876,28 @@ public class FlorestaWalletTracker
         return Math.Max(0, tipHeight - (int)blockHeight.Value + 1);
     }
 
+    internal static int GetTransactionConfirmations(TrackedTransaction transaction, int tipHeight)
+    {
+        return transaction.RemovedAt is not null ? -1 : GetConfirmations(transaction.BlockHeight, tipHeight);
+    }
+
     internal static int GetConfirmedHeight(long? blockHeight, int confirmations)
     {
         return confirmations > 0 && blockHeight is > 0 ? (int)blockHeight.Value : 0;
+    }
+
+    private TransactionInformation CreateTransactionInformation(TrackedTransaction tx, int tipHeight)
+    {
+        var confirmations = GetTransactionConfirmations(tx, tipHeight);
+        return new TransactionInformation
+        {
+            TransactionId = uint256.Parse(tx.Txid),
+            Transaction = tx.RawTx != null ? Transaction.Load(tx.RawTx, _network) : null,
+            Confirmations = confirmations,
+            Height = GetConfirmedHeight(tx.BlockHeight, confirmations),
+            Timestamp = tx.SeenAt,
+            BalanceChange = Money.Satoshis(tx.BalanceChange)
+        };
     }
 
     internal static FlorestaElectrumUnspentItem NormalizeUtxoPosition(
@@ -726,8 +915,11 @@ public class FlorestaWalletTracker
     public class NewTransactionInfo
     {
         public string TxId { get; set; }
+        public Transaction Transaction { get; set; }
+        public TrackedSource TrackedSource { get; set; }
         public DerivationStrategyBase DerivationStrategy { get; set; }
         public int Confirmations { get; set; }
+        public int Height { get; set; }
         public bool IsRbf { get; set; }
         public DateTimeOffset SeenAt { get; set; }
         public List<OutputInfo> Outputs { get; set; } = new();
@@ -739,6 +931,7 @@ public class FlorestaWalletTracker
         public string TrackedDestination { get; set; }
         public int Index { get; set; }
         public Money Value { get; set; }
+        public Script ScriptPubKey { get; set; }
         public string KeyPath { get; set; }
         public int KeyIndex { get; set; }
     }

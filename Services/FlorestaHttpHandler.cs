@@ -84,6 +84,15 @@ public class FlorestaHttpHandler(
 
             }
 
+            // POST /v1/cryptos/{code}/addresses/{address} — Track address source
+            if (method == HttpMethod.Post && Regex.IsMatch(path, @"/v1/cryptos/\w+/addresses/[^/]+$"))
+            {
+                var address = ExtractAddress(path);
+                if (address == null) return NotFoundResponse();
+                await tracker.TrackAddressAsync(address, cancellationToken);
+                return new HttpResponseMessage(HttpStatusCode.OK);
+            }
+
             // GET /v1/cryptos/{code}/derivations/{strategy}/addresses/unused — GetUnused
             if (method == HttpMethod.Get && path.Contains("/addresses/unused"))
             {
@@ -165,7 +174,8 @@ public class FlorestaHttpHandler(
                 var body = request.Content is null
                     ? []
                     : await request.Content.ReadAsByteArrayAsync(cancellationToken);
-                var result = await tracker.BroadcastAsync(body, cancellationToken);
+                var testMempoolAccept = ExtractQueryBool(request.RequestUri?.Query ?? "", "testMempoolAccept");
+                var result = await tracker.BroadcastAsync(body, testMempoolAccept, cancellationToken);
                 return OkResponse(result);
             }
 
@@ -282,6 +292,12 @@ public class FlorestaHttpHandler(
         return match.Success ? match.Groups[1].Value : null;
     }
 
+    private string ExtractAddress(string path)
+    {
+        var match = Regex.Match(path, @"/addresses/([^/]+)$");
+        return match.Success ? Uri.UnescapeDataString(match.Groups[1].Value) : null;
+    }
+
     private string ExtractMetadataKey(string path)
     {
         var match = Regex.Match(path, @"/metadata/([^/]+)$");
@@ -294,14 +310,23 @@ public class FlorestaHttpHandler(
         return match.Success && int.TryParse(match.Groups[1].Value, out var val) ? val : null;
     }
 
+    private bool ExtractQueryBool(string query, string key)
+    {
+        var match = Regex.Match(query, $@"[?&]{key}=([^&]+)", RegexOptions.IgnoreCase);
+        return match.Success &&
+               bool.TryParse(Uri.UnescapeDataString(match.Groups[1].Value), out var value) &&
+               value;
+    }
+
     private string ExtractTxId(string path)
     {
         var match = Regex.Match(path, @"/transactions/([0-9a-fA-F]{64})");
         return match.Success ? match.Groups[1].Value : null;
     }
 
-    private static string SanitizePathForLog(string path)
+    internal static string SanitizePathForLog(string path)
     {
+        path = Regex.Replace(path, @"(/v1/cryptos/\w+/addresses/)[^/]+$", "$1{address}");
         return Regex.Replace(path, @"/derivations/[^/]+", "/derivations/{wallet}");
     }
 

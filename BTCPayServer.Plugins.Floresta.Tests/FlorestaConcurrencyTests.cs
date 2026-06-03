@@ -85,6 +85,14 @@ public class FlorestaConcurrencyTests
     }
 
     [Fact]
+    public void RemovedTransactionReportsNegativeConfirmation()
+    {
+        var tx = new TrackedTransaction { BlockHeight = null, RemovedAt = DateTimeOffset.UtcNow };
+
+        Assert.Equal(-1, FlorestaWalletTracker.GetTransactionConfirmations(tx, 10));
+    }
+
+    [Fact]
     public void ConfirmedHeightIsZeroForUnconfirmedResponses()
     {
         Assert.Equal(0, FlorestaWalletTracker.GetConfirmedHeight(12, 0));
@@ -114,20 +122,37 @@ public class FlorestaConcurrencyTests
     }
 
     [Fact]
-    public void MissingHistoryDemotesOnlyPreviouslyConfirmedTransactions()
+    public void HistoryBlockHeightClearsRemovalStateWhenTransactionReappears()
+    {
+        var tx = new TrackedTransaction
+        {
+            BlockHeight = null,
+            RemovedAt = DateTimeOffset.UtcNow
+        };
+
+        FlorestaWalletSync.ApplyHistoryBlockHeight(tx, 0);
+
+        Assert.Null(tx.BlockHeight);
+        Assert.Null(tx.RemovedAt);
+    }
+
+    [Fact]
+    public void MissingHistoryMarksActiveTransactionsRemoved()
     {
         var present = new TrackedTransaction { Txid = "present", BlockHeight = 12 };
         var missing = new TrackedTransaction { Txid = "missing", BlockHeight = 12 };
         var unconfirmed = new TrackedTransaction { Txid = "unconfirmed", BlockHeight = null };
+        var alreadyRemoved = new TrackedTransaction { Txid = "removed", RemovedAt = DateTimeOffset.UtcNow };
 
-        var demoted = FlorestaWalletSync.DemoteTransactionsMissingFromHistory(
-            new[] { present, missing, unconfirmed },
+        var removed = FlorestaWalletSync.MarkTransactionsMissingFromHistory(
+            new[] { present, missing, unconfirmed, alreadyRemoved },
             new HashSet<string> { "present" });
 
-        Assert.Equal(1, demoted);
+        Assert.Equal(2, removed);
         Assert.Equal(12, present.BlockHeight);
-        Assert.Null(missing.BlockHeight);
-        Assert.Null(unconfirmed.BlockHeight);
+        Assert.NotNull(missing.RemovedAt);
+        Assert.NotNull(unconfirmed.RemovedAt);
+        Assert.NotNull(alreadyRemoved.RemovedAt);
     }
 
     private static FlorestaStatusMonitor CreateStatusMonitor()

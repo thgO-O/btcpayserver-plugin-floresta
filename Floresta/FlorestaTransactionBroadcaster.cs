@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using NBitcoin.RPC;
 using NBXplorer.Models;
 
 namespace BTCPayServer.Plugins.Floresta;
@@ -24,16 +25,36 @@ internal sealed class FlorestaTransactionBroadcaster
 
     public Task<BroadcastResult> BroadcastAsync(string body, CancellationToken ct)
     {
-        return BroadcastAsync(Encoding.UTF8.GetBytes(body), ct);
+        return BroadcastAsync(Encoding.UTF8.GetBytes(body), false, ct);
     }
 
-    public async Task<BroadcastResult> BroadcastAsync(byte[] body, CancellationToken ct)
+    public Task<BroadcastResult> BroadcastAsync(string body, bool testMempoolAccept, CancellationToken ct)
+    {
+        return BroadcastAsync(Encoding.UTF8.GetBytes(body), testMempoolAccept, ct);
+    }
+
+    public Task<BroadcastResult> BroadcastAsync(byte[] body, CancellationToken ct)
+    {
+        return BroadcastAsync(body, false, ct);
+    }
+
+    public async Task<BroadcastResult> BroadcastAsync(byte[] body, bool testMempoolAccept, CancellationToken ct)
     {
         if (!TryExtractRawTransactionHex(body, out var rawTx, out var parseError))
         {
             return new BroadcastResult(false)
             {
                 RPCMessage = parseError
+            };
+        }
+
+        if (testMempoolAccept)
+        {
+            return new BroadcastResult(false)
+            {
+                RPCCode = RPCErrorCode.RPC_METHOD_NOT_FOUND,
+                RPCCodeMessage = "testmempoolaccept is not supported by the Floresta plugin backend.",
+                RPCMessage = "Floresta plugin cannot validate mempool acceptance without broadcasting."
             };
         }
 

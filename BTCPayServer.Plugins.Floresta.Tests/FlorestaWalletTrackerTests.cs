@@ -1,3 +1,6 @@
+using System.Linq;
+using BTCPayServer.Plugins.Floresta.Data;
+using Microsoft.EntityFrameworkCore;
 using NBitcoin;
 using Xunit;
 
@@ -5,6 +8,47 @@ namespace BTCPayServer.Plugins.Floresta.Tests;
 
 public class FlorestaWalletTrackerTests
 {
+    [Fact]
+    public void TrackedAddressOwnersUseWalletAndScripthashKey()
+    {
+        var options = new DbContextOptionsBuilder<FlorestaDbContext>()
+            .UseNpgsql("Host=localhost;Database=btcpayserver")
+            .Options;
+        using var ctx = new FlorestaDbContext(options);
+
+        var entity = ctx.Model.FindEntityType(typeof(TrackedAddressOwner));
+        var key = entity!.FindPrimaryKey()!.Properties.Select(p => p.Name).ToArray();
+
+        Assert.Equal(new[] { "WalletId", "Scripthash" }, key);
+    }
+
+    [Fact]
+    public void AddressSourceKeepsRequestedWalletOwnerForKnownScript()
+    {
+        var address = new Key().PubKey.GetAddress(ScriptPubKeyType.Segwit, Network.RegTest);
+        var script = address.ScriptPubKey;
+        var existing = new TrackedAddress
+        {
+            Scripthash = ScriptHashUtility.ComputeScriptHash(script),
+            WalletId = "derivation-wallet",
+            KeyPath = "0/4",
+            ScriptPubKey = script.ToBytes(),
+            Address = address.ToString(),
+            IsChange = false,
+            IsReserved = true,
+            IsUsed = true
+        };
+
+        var source = FlorestaWalletTracker.CreateAddressSource(existing, address.ToString());
+
+        Assert.Equal(existing.Scripthash, source.Scripthash);
+        Assert.Equal(address.ToString(), source.WalletId);
+        Assert.Null(source.KeyPath);
+        Assert.False(source.IsReserved);
+        Assert.True(source.IsUsed);
+        Assert.Equal(existing.ScriptPubKey, source.ScriptPubKey);
+    }
+
     [Fact]
     public void NormalizeUtxoPositionCorrectsWrongElectrumTxPos()
     {
