@@ -324,8 +324,9 @@ public class FlorestaHttpHandler(
         return match.Success ? match.Groups[1].Value : null;
     }
 
-    private static string SanitizePathForLog(string path)
+    internal static string SanitizePathForLog(string path)
     {
+        path = Regex.Replace(path, @"(/v1/cryptos/\w+/addresses/)[^/]+$", "$1{address}");
         return Regex.Replace(path, @"/derivations/[^/]+", "/derivations/{wallet}");
     }
 

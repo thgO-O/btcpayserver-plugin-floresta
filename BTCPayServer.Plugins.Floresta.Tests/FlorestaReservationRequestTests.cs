@@ -78,6 +78,18 @@ public class FlorestaReservationRequestTests
     }
 
     [Fact]
+    public void SanitizesTrackedAddressRouteForLogs()
+    {
+        var address = new Key().PubKey.WitHash.GetAddress(Network.RegTest).ToString();
+        var path = $"/v1/cryptos/BTC/addresses/{address}";
+
+        var sanitized = FlorestaHttpHandler.SanitizePathForLog(path);
+
+        Assert.Equal("/v1/cryptos/BTC/addresses/{address}", sanitized);
+        Assert.DoesNotContain(address, sanitized);
+    }
+
+    [Fact]
     public async Task BroadcastTestMempoolAcceptUsesQueryParameter()
     {
         var handler = new RecordingRequestHandler();
