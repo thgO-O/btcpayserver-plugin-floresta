@@ -919,6 +919,7 @@ public class FlorestaWalletTracker
         public TrackedSource TrackedSource { get; set; }
         public DerivationStrategyBase DerivationStrategy { get; set; }
         public int Confirmations { get; set; }
+        public int Height { get; set; }
         public bool IsRbf { get; set; }
         public DateTimeOffset SeenAt { get; set; }
         public List<OutputInfo> Outputs { get; set; } = new();

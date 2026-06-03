@@ -343,14 +343,7 @@ public class FlorestaListener : IHostedService
             CryptoCode = network.CryptoCode,
             DerivationStrategy = txInfo.DerivationStrategy,
             TrackedSource = txInfo.TrackedSource,
-            TransactionData = new NBXplorer.Models.TransactionResult
-            {
-                TransactionHash = txHash,
-                Transaction = txInfo.Transaction,
-                Confirmations = txInfo.Confirmations,
-                Height = 0,
-                Timestamp = txInfo.SeenAt
-            },
+            TransactionData = CreateTransactionResult(txInfo, txHash),
             Outputs = txInfo.Outputs.Select(output => new MatchedOutput
             {
                 Address = string.IsNullOrWhiteSpace(output.Address)
@@ -374,6 +367,20 @@ public class FlorestaListener : IHostedService
             PaymentMethodId = pmi,
             NewTransactionEvent = evt
         });
+    }
+
+    internal static NBXplorer.Models.TransactionResult CreateTransactionResult(
+        FlorestaWalletTracker.NewTransactionInfo txInfo,
+        uint256 txHash)
+    {
+        return new NBXplorer.Models.TransactionResult
+        {
+            TransactionHash = txHash,
+            Transaction = txInfo.Transaction,
+            Confirmations = txInfo.Confirmations,
+            Height = txInfo.Height,
+            Timestamp = txInfo.SeenAt
+        };
     }
 
     private async Task FindPaymentsViaPolling(CancellationToken ct)

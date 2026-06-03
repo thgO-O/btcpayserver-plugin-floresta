@@ -1,7 +1,9 @@
+using System;
 using System.Collections.Generic;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Payments;
 using BTCPayServer.Payments.Bitcoin;
+using BTCPayServer.Plugins.Floresta;
 using BTCPayServer.Plugins.Floresta.Services;
 using BTCPayServer.Services.Invoices;
 using NBitcoin;
@@ -66,6 +68,31 @@ public class FlorestaListenerTests
         Assert.Equal(-1, FlorestaListener.ClampConfirmations(-1, network));
         Assert.Equal(2, FlorestaListener.ClampConfirmations(2, network));
         Assert.Equal(3, FlorestaListener.ClampConfirmations(20, network));
+    }
+
+    [Fact]
+    public void TransactionResultUsesNewTransactionInfoHeight()
+    {
+        var tx = Transaction.Create(Network.RegTest);
+        var txHash = tx.GetHash();
+        var seenAt = DateTimeOffset.UtcNow;
+
+        var result = FlorestaListener.CreateTransactionResult(
+            new FlorestaWalletTracker.NewTransactionInfo
+            {
+                TxId = txHash.ToString(),
+                Transaction = tx,
+                Confirmations = 2,
+                Height = 120,
+                SeenAt = seenAt
+            },
+            txHash);
+
+        Assert.Equal(txHash, result.TransactionHash);
+        Assert.Equal(tx, result.Transaction);
+        Assert.Equal(2, result.Confirmations);
+        Assert.Equal(120, result.Height);
+        Assert.Equal(seenAt, result.Timestamp);
     }
 
     private static BTCPayNetwork CreateBitcoinNetwork()

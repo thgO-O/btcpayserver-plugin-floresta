@@ -410,6 +410,7 @@ internal sealed class FlorestaWalletSync
         IDictionary<string, TrackedAddress> walletAddresses)
     {
         var tipHeight = _getTipHeight();
+        var confirmations = FlorestaWalletTracker.GetConfirmations(historyItem.Height, tipHeight);
         var info = new FlorestaWalletTracker.NewTransactionInfo
         {
             TxId = tx.GetHash().ToString(),
@@ -418,7 +419,8 @@ internal sealed class FlorestaWalletSync
             TrackedSource = strategy != null
                 ? TrackedSource.Create(strategy)
                 : TrackedSource.Create(BitcoinAddress.Create(triggeringAddress.Address, _network)),
-            Confirmations = FlorestaWalletTracker.GetConfirmations(historyItem.Height, tipHeight),
+            Confirmations = confirmations,
+            Height = FlorestaWalletTracker.GetConfirmedHeight(historyItem.Height, confirmations),
             IsRbf = tx.RBF,
             SeenAt = DateTimeOffset.UtcNow
         };
