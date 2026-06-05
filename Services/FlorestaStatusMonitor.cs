@@ -2,9 +2,11 @@ using System;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Data;
 using BTCPayServer.Events;
 using BTCPayServer.HostedServices;
 using BTCPayServer.Services;
+using BTCPayServer.Services.Stores;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using NBXplorer.Models;
@@ -19,6 +21,7 @@ public class FlorestaStatusMonitor : IHostedService
     private readonly FlorestaElectrumClient _client;
     private readonly FlorestaRpcClient _rpcClient;
     private readonly SettingsRepository _settingsRepository;
+    private readonly StoreRepository _storeRepository;
     private readonly NBXplorerDashboard _dashboard;
     private readonly BTCPayNetworkProvider _networkProvider;
     private readonly EventAggregator _eventAggregator;
@@ -44,6 +47,7 @@ public class FlorestaStatusMonitor : IHostedService
         FlorestaElectrumClient client,
         FlorestaRpcClient rpcClient,
         SettingsRepository settingsRepository,
+        StoreRepository storeRepository,
         NBXplorerDashboard dashboard,
         BTCPayNetworkProvider networkProvider,
         EventAggregator eventAggregator,
@@ -52,17 +56,19 @@ public class FlorestaStatusMonitor : IHostedService
         _client = client;
         _rpcClient = rpcClient;
         _settingsRepository = settingsRepository;
+        _storeRepository = storeRepository;
         _dashboard = dashboard;
         _networkProvider = networkProvider;
         _eventAggregator = eventAggregator;
         _logger = logger;
     }
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
+        DisableUnsupportedNetworkCapabilities(_networkProvider.GetNetwork<BTCPayNetwork>("BTC"));
+        await DisableStorePayJoinAsync();
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _monitorLoop = MonitorLoop(_cts.Token);
-        return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -201,15 +207,68 @@ public class FlorestaStatusMonitor : IHostedService
                 IsSynched = State == NBXplorerState.Ready,
                 MinRelayTxFee = new NBitcoin.FeeRate(1.0m),
                 IncrementalRelayFee = new NBitcoin.FeeRate(1.0m),
-                Capabilities = new NodeCapabilities
-                {
-                    CanScanTxoutSet = true,
-                    CanSupportSegwit = true,
-                    CanSupportTaproot = true,
-                    CanSupportTransactionCheck = true
-                }
+                Capabilities = CreateNodeCapabilities()
             }
         };
+    }
+
+    internal static NodeCapabilities CreateNodeCapabilities()
+    {
+        return new NodeCapabilities
+        {
+            CanScanTxoutSet = true,
+            CanSupportSegwit = true,
+            CanSupportTaproot = true,
+            CanSupportTransactionCheck = false
+        };
+    }
+
+    internal static void DisableUnsupportedNetworkCapabilities(BTCPayNetwork network)
+    {
+        if (network is null)
+            return;
+
+        network.SupportPayJoin = false;
+    }
+
+    internal static bool DisableStorePayJoin(StoreData store)
+    {
+        var blob = store.GetStoreBlob();
+        if (!blob.PayJoinEnabled)
+            return false;
+
+        blob.PayJoinEnabled = false;
+        return store.SetStoreBlob(blob);
+    }
+
+    private async Task DisableStorePayJoinAsync()
+    {
+        if (_storeRepository is null)
+            return;
+
+        try
+        {
+            var disabled = 0;
+            foreach (var store in await _storeRepository.GetStores())
+            {
+                if (!DisableStorePayJoin(store))
+                    continue;
+
+                await _storeRepository.UpdateStoreBlob(store);
+                disabled++;
+            }
+
+            if (disabled > 0)
+            {
+                _logger.LogInformation(
+                    "Disabled PayJoin on {StoreCount} stores because the Floresta backend does not support transaction checks",
+                    disabled);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not disable store PayJoin settings for the Floresta backend");
+        }
     }
 
     private void UpdateChainInfo(JsonElement blockchainInfo)

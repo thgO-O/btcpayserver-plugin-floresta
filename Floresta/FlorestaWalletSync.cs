@@ -120,33 +120,15 @@ internal sealed class FlorestaWalletSync
         await walletLock.WaitAsync(ct);
         try
         {
-            await using var ctx = _dbFactory.CreateContext();
-            var walletAddresses = await FlorestaWalletTracker.GetTrackedAddressSourcesAsync(ctx, walletId, ct);
-            var walletAddressesByScripthash = walletAddresses.ToDictionary(a => a.Scripthash);
-            if (!walletAddressesByScripthash.TryGetValue(source.Scripthash, out var reloadedAddress))
-                reloadedAddress = source;
+            List<TrackedAddress> walletAddresses;
+            await using (var ctx = _dbFactory.CreateContext())
+            {
+                walletAddresses = await FlorestaWalletTracker.GetTrackedAddressSourcesAsync(ctx, walletId, ct);
+                if (walletAddresses.All(a => a.Scripthash != source.Scripthash))
+                    walletAddresses.Add(source);
+            }
 
-            var existingTxids = await ctx.Transactions
-                .Where(t => t.WalletId == walletId)
-                .Select(t => t.Txid)
-                .ToHashSetAsync(ct);
-
-            _trackedStrategies.TryGetValue(walletId, out var strategy);
-
-            var addressesToSubscribe = new List<TrackedAddress>();
-            var newTxs = await SyncAddressAsync(
-                ctx,
-                reloadedAddress,
-                strategy,
-                walletAddressesByScripthash,
-                existingTxids,
-                null,
-                ct,
-                addressesToSubscribe);
-
-            await ctx.SaveChangesAsync(ct);
-            await SubscribeTrackedAddressesAsync(addressesToSubscribe, ct);
-            return newTxs;
+            return await SyncWalletStateCoreAsync(walletId, walletAddresses, ct, null);
         }
         finally
         {
