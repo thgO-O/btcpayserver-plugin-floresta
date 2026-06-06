@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using BTCPayServer.Client.Models;
+using BTCPayServer.Data;
 using BTCPayServer.Payments;
 using BTCPayServer.Payments.Bitcoin;
 using BTCPayServer.Plugins.Floresta;
@@ -93,6 +94,62 @@ public class FlorestaListenerTests
         Assert.Equal(2, result.Confirmations);
         Assert.Equal(120, result.Height);
         Assert.Equal(seenAt, result.Timestamp);
+    }
+
+    [Fact]
+    public void PaymentOutpointUsesCanonicalPaymentIdFormat()
+    {
+        var txId = uint256.One.ToString();
+        var outpoint = FlorestaListener.CreatePaymentOutPoint(txId, 2);
+
+        Assert.Equal($"{txId}-2", outpoint.ToString());
+        Assert.DoesNotContain(":", outpoint.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FlorestaCapabilitiesDoNotAdvertiseTransactionCheck()
+    {
+        var capabilities = FlorestaStatusMonitor.CreateNodeCapabilities();
+
+        Assert.True(capabilities.CanScanTxoutSet);
+        Assert.True(capabilities.CanSupportSegwit);
+        Assert.True(capabilities.CanSupportTaproot);
+        Assert.False(capabilities.CanSupportTransactionCheck);
+    }
+
+    [Fact]
+    public void FlorestaBackendDisablesNetworkPayJoinSupport()
+    {
+        var network = CreateBitcoinNetwork();
+
+        FlorestaStatusMonitor.DisableUnsupportedNetworkCapabilities(network);
+
+        Assert.False(network.SupportPayJoin);
+    }
+
+    [Fact]
+    public void FlorestaBackendDisablesStorePayJoin()
+    {
+        var store = new BTCPayServer.Data.StoreData();
+        var blob = store.GetStoreBlob();
+        blob.PayJoinEnabled = true;
+        store.SetStoreBlob(blob);
+
+        var changed = FlorestaStatusMonitor.DisableStorePayJoin(store);
+
+        Assert.True(changed);
+        Assert.False(store.GetStoreBlob().PayJoinEnabled);
+    }
+
+    [Fact]
+    public void FlorestaBackendLeavesAlreadyDisabledStorePayJoinUnchanged()
+    {
+        var store = new BTCPayServer.Data.StoreData();
+
+        var changed = FlorestaStatusMonitor.DisableStorePayJoin(store);
+
+        Assert.False(changed);
+        Assert.False(store.GetStoreBlob().PayJoinEnabled);
     }
 
     private static BTCPayNetwork CreateBitcoinNetwork()

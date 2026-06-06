@@ -285,9 +285,11 @@ public class FlorestaListener : IHostedService
             if (invoice == null)
                 continue;
 
+            var outpoint = CreatePaymentOutPoint(txInfo.TxId, output.Index);
+
             var paymentData = new PaymentData
             {
-                Id = $"{txInfo.TxId}:{output.Index}",
+                Id = outpoint.ToString(),
                 InvoiceDataId = invoice.Id,
                 PaymentMethodId = pmi.ToString(),
                 Status = txInfo.Confirmations > 0 ? PaymentStatus.Settled : PaymentStatus.Processing,
@@ -300,7 +302,7 @@ public class FlorestaListener : IHostedService
             if (handler == null) continue;
 
             var details = new BitcoinLikePaymentData(
-                new OutPoint(uint256.Parse(txInfo.TxId), (uint)output.Index),
+                outpoint,
                 txInfo.IsRbf,
                 new KeyPath(output.KeyPath),
                 output.KeyIndex)
@@ -327,6 +329,11 @@ public class FlorestaListener : IHostedService
                     _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
             }
         }
+    }
+
+    internal static OutPoint CreatePaymentOutPoint(string txId, int outputIndex)
+    {
+        return new OutPoint(uint256.Parse(txId), (uint)outputIndex);
     }
 
     private void PublishNewOnChainTransaction(

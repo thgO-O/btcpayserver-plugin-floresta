@@ -164,6 +164,7 @@ public class FlorestaConcurrencyTests
             null!,
             null!,
             null!,
+            null!,
             NullLogger<FlorestaStatusMonitor>.Instance);
     }
 }

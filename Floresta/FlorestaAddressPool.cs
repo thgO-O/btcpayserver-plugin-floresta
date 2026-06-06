@@ -69,10 +69,7 @@ internal sealed class FlorestaAddressPool
                 existing.ReceiveGapIndex = Math.Max(existing.ReceiveGapIndex, settings.GapLimit - 1);
                 existing.ChangeGapIndex = Math.Max(existing.ChangeGapIndex, settings.GapLimit - 1);
 
-                var existingHashes = await ctx.TrackedAddresses
-                    .Where(a => a.WalletId == strategyStr)
-                    .Select(a => a.Scripthash)
-                    .ToHashSetAsync(ct);
+                var existingHashes = await GetPrimaryWalletScripthashesAsync(ctx, strategyStr, ct);
 
                 var addressesToAdd = DeriveAddresses(strategy, false, 0, existing.ReceiveGapIndex + 1)
                     .Concat(DeriveAddresses(strategy, true, 0, existing.ChangeGapIndex + 1));
@@ -81,16 +78,13 @@ internal sealed class FlorestaAddressPool
                     if (existingHashes.Contains(addr.Scripthash))
                         continue;
 
-                    addr.WalletId = strategyStr;
-                    ctx.TrackedAddresses.Add(addr);
+                    await AttachOrLinkAddressAsync(ctx, addr, strategyStr, ct);
                     existingHashes.Add(addr.Scripthash);
                 }
 
                 await ctx.SaveChangesAsync(ct);
                 _trackedStrategies[strategyStr] = strategy;
-                return await ctx.TrackedAddresses
-                    .Where(a => a.WalletId == strategyStr)
-                    .ToListAsync(ct);
+                return await FlorestaWalletTracker.GetTrackedAddressSourcesAsync(ctx, strategyStr, ct);
             }
 
             var wallet = new TrackedWallet
@@ -111,16 +105,19 @@ internal sealed class FlorestaAddressPool
 
             var addresses = DeriveAddresses(strategy, false, 0, settings.GapLimit);
             addresses.AddRange(DeriveAddresses(strategy, true, 0, settings.GapLimit));
+            var addedHashes = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (var addr in addresses)
             {
-                addr.WalletId = strategyStr;
-                ctx.TrackedAddresses.Add(addr);
+                if (!addedHashes.Add(addr.Scripthash))
+                    continue;
+
+                await AttachOrLinkAddressAsync(ctx, addr, strategyStr, ct);
             }
 
             await ctx.SaveChangesAsync(ct);
             _trackedStrategies[strategyStr] = strategy;
-            return addresses;
+            return await FlorestaWalletTracker.GetTrackedAddressSourcesAsync(ctx, strategyStr, ct);
         }
         finally
         {
@@ -266,10 +263,7 @@ internal sealed class FlorestaAddressPool
                 FlorestaWalletDescriptorMetadata.Apply(wallet, descriptorRegistration, descriptorRegisteredAt, null);
             }
 
-            var existingHashes = await ctx.TrackedAddresses
-                .Where(a => a.WalletId == strategyStr)
-                .Select(a => a.Scripthash)
-                .ToHashSetAsync(ct);
+            var existingHashes = await GetPrimaryWalletScripthashesAsync(ctx, strategyStr, ct);
 
             var newAddresses = new List<TrackedAddress>();
             foreach (var addr in DeriveAddresses(strategy, false, startingIndex, gapLimit)
@@ -278,10 +272,8 @@ internal sealed class FlorestaAddressPool
                 if (existingHashes.Contains(addr.Scripthash))
                     continue;
 
-                addr.WalletId = strategyStr;
-                ctx.TrackedAddresses.Add(addr);
+                newAddresses.Add(await AttachOrLinkAddressAsync(ctx, addr, strategyStr, ct));
                 existingHashes.Add(addr.Scripthash);
-                newAddresses.Add(addr);
             }
 
             await ctx.SaveChangesAsync(ct);
@@ -347,9 +339,7 @@ internal sealed class FlorestaAddressPool
         var newAddresses = DeriveAddresses(strategy, usedAddr.IsChange, deriveFrom, deriveCount);
         foreach (var addr in newAddresses)
         {
-            addr.WalletId = wallet.Id;
-            ctx.TrackedAddresses.Add(addr);
-            addedAddresses.Add(addr);
+            addedAddresses.Add(await AttachOrLinkAddressAsync(ctx, addr, wallet.Id, ct));
         }
 
         if (usedAddr.IsChange)
@@ -381,20 +371,15 @@ internal sealed class FlorestaAddressPool
         var deriveFrom = currentGapIndex + 1;
         var deriveCount = Math.Max(settings.GapLimit, 1);
         var newGapIndex = currentGapIndex + deriveCount;
-        var existingHashes = await ctx.TrackedAddresses
-            .Where(a => a.WalletId == strategyStr)
-            .Select(a => a.Scripthash)
-            .ToHashSetAsync(ct);
+        var existingHashes = await GetPrimaryWalletScripthashesAsync(ctx, strategyStr, ct);
 
         foreach (var addr in DeriveAddresses(strategy, isChange, deriveFrom, deriveCount))
         {
             if (existingHashes.Contains(addr.Scripthash))
                 continue;
 
-            addr.WalletId = strategyStr;
-            ctx.TrackedAddresses.Add(addr);
+            addedAddresses.Add(await AttachOrLinkAddressAsync(ctx, addr, strategyStr, ct));
             existingHashes.Add(addr.Scripthash);
-            addedAddresses.Add(addr);
         }
 
         if (isChange)
@@ -404,6 +389,74 @@ internal sealed class FlorestaAddressPool
 
         await ctx.SaveChangesAsync(ct);
         return addedAddresses;
+    }
+
+    // Only primary rows carry derivation and reservation metadata. Owner links are sync aliases.
+    private static async Task<HashSet<string>> GetPrimaryWalletScripthashesAsync(
+        FlorestaDbContext ctx,
+        string walletId,
+        CancellationToken ct)
+    {
+        return (await ctx.TrackedAddresses
+            .Where(a => a.WalletId == walletId)
+            .Select(a => a.Scripthash)
+            .ToListAsync(ct))
+            .ToHashSet(StringComparer.Ordinal);
+    }
+
+    private static async Task<TrackedAddress> AttachOrLinkAddressAsync(
+        FlorestaDbContext ctx,
+        TrackedAddress address,
+        string walletId,
+        CancellationToken ct)
+    {
+        address.WalletId = walletId;
+        var existing = await ctx.TrackedAddresses
+            .Include(a => a.Wallet)
+            .SingleOrDefaultAsync(a => a.Scripthash == address.Scripthash, ct);
+
+        if (existing == null)
+        {
+            ctx.TrackedAddresses.Add(address);
+            return address;
+        }
+
+        if (existing.WalletId == walletId)
+            return existing;
+
+        if (existing.Wallet?.DerivationStrategy == null && address.KeyPath != null)
+        {
+            var previousWalletId = existing.WalletId;
+            existing.WalletId = walletId;
+            existing.KeyPath = address.KeyPath;
+            existing.ScriptPubKey = address.ScriptPubKey;
+            existing.Address = address.Address;
+            existing.IsChange = address.IsChange;
+            existing.IsUsed |= address.IsUsed;
+            existing.IsReserved |= address.IsReserved;
+
+            await EnsureAddressOwnerAsync(ctx, previousWalletId, existing.Scripthash, ct);
+            return existing;
+        }
+
+        await EnsureAddressOwnerAsync(ctx, walletId, existing.Scripthash, ct);
+        return FlorestaWalletTracker.CreateAddressSource(existing, walletId);
+    }
+
+    private static async Task EnsureAddressOwnerAsync(
+        FlorestaDbContext ctx,
+        string walletId,
+        string scripthash,
+        CancellationToken ct)
+    {
+        if (await ctx.TrackedAddressOwners.FindAsync(new object[] { walletId, scripthash }, ct) != null)
+            return;
+
+        ctx.TrackedAddressOwners.Add(new TrackedAddressOwner
+        {
+            WalletId = walletId,
+            Scripthash = scripthash
+        });
     }
 
     private List<TrackedAddress> DeriveAddresses(
@@ -453,6 +506,7 @@ internal sealed class FlorestaAddressPool
             .ToListAsync(ct);
 
         return candidates
+            .Where(TrackedAddressReservationPolicy.IsAvailableForReservation)
             .OrderBy(TrackedAddressReservationPolicy.GetKeyIndexOrMax)
             .FirstOrDefault();
     }
