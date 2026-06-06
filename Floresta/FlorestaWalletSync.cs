@@ -211,8 +211,8 @@ internal sealed class FlorestaWalletSync
 
         _trackedStrategies.TryGetValue(walletId, out var strategy);
 
-        var walletAddresses = (await FlorestaWalletTracker.GetTrackedAddressSourcesAsync(ctx, walletId, ct))
-            .ToDictionary(a => a.Scripthash);
+        var persistedWalletAddresses = await FlorestaWalletTracker.GetTrackedAddressSourcesAsync(ctx, walletId, ct);
+        var walletAddresses = BuildWalletAddressMap(persistedWalletAddresses, addresses, walletId);
 
         var processed = 0;
         var total = addresses.Count;
@@ -440,6 +440,29 @@ internal sealed class FlorestaWalletSync
         if (transaction.BlockHeight != blockHeight)
             transaction.BlockHeight = blockHeight;
         transaction.RemovedAt = null;
+    }
+
+    internal static Dictionary<string, TrackedAddress> BuildWalletAddressMap(
+        IEnumerable<TrackedAddress> persistedSources,
+        IEnumerable<TrackedAddress> requestedSources,
+        string walletId)
+    {
+        var walletAddresses = (persistedSources ?? Enumerable.Empty<TrackedAddress>())
+            .Where(a => a is not null && !string.IsNullOrWhiteSpace(a.Scripthash))
+            .GroupBy(a => a.Scripthash)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+
+        foreach (var source in requestedSources ?? Enumerable.Empty<TrackedAddress>())
+        {
+            if (source is null ||
+                source.WalletId != walletId ||
+                string.IsNullOrWhiteSpace(source.Scripthash))
+                continue;
+
+            walletAddresses.TryAdd(source.Scripthash, source);
+        }
+
+        return walletAddresses;
     }
 
     internal static int MarkTransactionsMissingFromHistory(

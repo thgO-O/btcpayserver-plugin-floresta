@@ -246,28 +246,41 @@ public class FlorestaStatusMonitor : IHostedService
         if (_storeRepository is null)
             return;
 
+        StoreData[] stores;
         try
         {
-            var disabled = 0;
-            foreach (var store in await _storeRepository.GetStores())
-            {
-                if (!DisableStorePayJoin(store))
-                    continue;
-
-                await _storeRepository.UpdateStoreBlob(store);
-                disabled++;
-            }
-
-            if (disabled > 0)
-            {
-                _logger.LogInformation(
-                    "Disabled PayJoin on {StoreCount} stores because the Floresta backend does not support transaction checks",
-                    disabled);
-            }
+            stores = await _storeRepository.GetStores();
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not disable store PayJoin settings for the Floresta backend");
+            _logger.LogWarning(ex, "Could not load stores to disable PayJoin settings for the Floresta backend");
+            return;
+        }
+
+        var disabled = 0;
+        foreach (var store in stores)
+        {
+            try
+            {
+                if (!DisableStorePayJoin(store))
+                    continue;
+                await _storeRepository.UpdateStoreBlob(store);
+                disabled++;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Could not disable PayJoin for store {StoreId} while starting the Floresta backend",
+                    store?.Id);
+            }
+        }
+
+        if (disabled > 0)
+        {
+            _logger.LogInformation(
+                "Disabled PayJoin on {StoreCount} stores because the Floresta backend does not support transaction checks",
+                disabled);
         }
     }
 

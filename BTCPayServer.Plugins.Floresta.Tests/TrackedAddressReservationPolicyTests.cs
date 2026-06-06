@@ -10,9 +10,16 @@ public class TrackedAddressReservationPolicyTests
     [Fact]
     public void ReservedAndUsedAddressesAreNotAvailableForReservation()
     {
-        Assert.True(TrackedAddressReservationPolicy.IsAvailableForReservation(new TrackedAddress()));
-        Assert.False(TrackedAddressReservationPolicy.IsAvailableForReservation(new TrackedAddress { IsReserved = true }));
-        Assert.False(TrackedAddressReservationPolicy.IsAvailableForReservation(new TrackedAddress { IsUsed = true }));
+        Assert.True(TrackedAddressReservationPolicy.IsAvailableForReservation(new TrackedAddress { KeyPath = "0/0" }));
+        Assert.False(TrackedAddressReservationPolicy.IsAvailableForReservation(new TrackedAddress { KeyPath = "0/0", IsReserved = true }));
+        Assert.False(TrackedAddressReservationPolicy.IsAvailableForReservation(new TrackedAddress { KeyPath = "0/0", IsUsed = true }));
+    }
+
+    [Fact]
+    public void AddressesWithoutKeyPathAreNotAvailableForReservation()
+    {
+        Assert.False(TrackedAddressReservationPolicy.IsAvailableForReservation(new TrackedAddress()));
+        Assert.False(TrackedAddressReservationPolicy.IsAvailableForReservation(new TrackedAddress { KeyPath = "" }));
     }
 
     [Fact]

@@ -69,7 +69,7 @@ internal sealed class FlorestaAddressPool
                 existing.ReceiveGapIndex = Math.Max(existing.ReceiveGapIndex, settings.GapLimit - 1);
                 existing.ChangeGapIndex = Math.Max(existing.ChangeGapIndex, settings.GapLimit - 1);
 
-                var existingHashes = await GetWalletScripthashesAsync(ctx, strategyStr, ct);
+                var existingHashes = await GetPrimaryWalletScripthashesAsync(ctx, strategyStr, ct);
 
                 var addressesToAdd = DeriveAddresses(strategy, false, 0, existing.ReceiveGapIndex + 1)
                     .Concat(DeriveAddresses(strategy, true, 0, existing.ChangeGapIndex + 1));
@@ -263,7 +263,7 @@ internal sealed class FlorestaAddressPool
                 FlorestaWalletDescriptorMetadata.Apply(wallet, descriptorRegistration, descriptorRegisteredAt, null);
             }
 
-            var existingHashes = await GetWalletScripthashesAsync(ctx, strategyStr, ct);
+            var existingHashes = await GetPrimaryWalletScripthashesAsync(ctx, strategyStr, ct);
 
             var newAddresses = new List<TrackedAddress>();
             foreach (var addr in DeriveAddresses(strategy, false, startingIndex, gapLimit)
@@ -371,7 +371,7 @@ internal sealed class FlorestaAddressPool
         var deriveFrom = currentGapIndex + 1;
         var deriveCount = Math.Max(settings.GapLimit, 1);
         var newGapIndex = currentGapIndex + deriveCount;
-        var existingHashes = await GetWalletScripthashesAsync(ctx, strategyStr, ct);
+        var existingHashes = await GetPrimaryWalletScripthashesAsync(ctx, strategyStr, ct);
 
         foreach (var addr in DeriveAddresses(strategy, isChange, deriveFrom, deriveCount))
         {
@@ -391,22 +391,17 @@ internal sealed class FlorestaAddressPool
         return addedAddresses;
     }
 
-    private static async Task<HashSet<string>> GetWalletScripthashesAsync(
+    // Only primary rows carry derivation and reservation metadata. Owner links are sync aliases.
+    private static async Task<HashSet<string>> GetPrimaryWalletScripthashesAsync(
         FlorestaDbContext ctx,
         string walletId,
         CancellationToken ct)
     {
-        var primary = await ctx.TrackedAddresses
+        return (await ctx.TrackedAddresses
             .Where(a => a.WalletId == walletId)
             .Select(a => a.Scripthash)
-            .ToListAsync(ct);
-
-        var owned = await ctx.TrackedAddressOwners
-            .Where(o => o.WalletId == walletId)
-            .Select(o => o.Scripthash)
-            .ToListAsync(ct);
-
-        return primary.Concat(owned).ToHashSet(StringComparer.Ordinal);
+            .ToListAsync(ct))
+            .ToHashSet(StringComparer.Ordinal);
     }
 
     private static async Task<TrackedAddress> AttachOrLinkAddressAsync(
@@ -511,6 +506,7 @@ internal sealed class FlorestaAddressPool
             .ToListAsync(ct);
 
         return candidates
+            .Where(TrackedAddressReservationPolicy.IsAvailableForReservation)
             .OrderBy(TrackedAddressReservationPolicy.GetKeyIndexOrMax)
             .FirstOrDefault();
     }
