@@ -1,194 +1,80 @@
-# BTCPayServer.Plugins.Floresta
+# BTCPay Server Floresta Plugin
 
-Experimental BTCPay Server plugin for using local `florestad` as the Bitcoin on-chain backend without Bitcoin Core, without storing the full blockchain, and without requiring NBXplorer at runtime.
+This plugin lets BTCPay Server use Floresta to follow Bitcoin payments.
 
-This plugin is alpha software. It is intended for technical evaluation and controlled mainnet PoCs, not unattended production stores.
+Floresta is a lighter Bitcoin node. The goal is to let BTCPay see Bitcoin payments without running the usual full Bitcoin Core and NBXplorer setup.
 
-Target architecture:
+This is alpha software. It is useful for testing and controlled trials, but it is not ready for unattended production stores.
 
-```text
-BTCPay Server
-  -> BTCPayServer.Plugins.Floresta
-  -> florestad
-       -> local Electrum server
-       -> local JSON-RPC server
-       -> Bitcoin P2P network
-```
+## What This Means
 
-This is a watch-only integration. It never stores private keys, seeds, or mnemonics.
+- You can try a lighter way for BTCPay to follow Bitcoin payments.
+- The plugin is watch-only: it can see payments, but it cannot spend your coins.
+- It never stores private keys, seeds, or recovery words.
+- You still use your own wallet app or hardware wallet to spend funds.
+- It is focused on regular single-person BTC wallets.
+- Existing BTCPay installations are not changed just by installing the plugin.
 
-Installing the plugin alone does not replace an existing BTCPay Bitcoin Core/NBXplorer backend. Backend replacement is opt-in at process startup with `FLORESTA_REPLACE_BTCPAY_BACKEND=true`.
+## Before You Use It
 
-## Descriptor-First Cache Architecture
+This plugin is currently best for people who want to test Floresta with BTCPay and understand the current limits.
 
-Floresta is the validation and descriptor backend. When BTCPay tracks a wallet, the plugin converts the BTCPay derivation strategy into receive and change descriptors, records their hash locally, and, when `FLORESTA_AUTO_REGISTER_DESCRIPTORS=true`, registers them with Floresta through `listdescriptors` and `loaddescriptor` before deriving and syncing addresses.
+Do not use it yet if you need:
 
-The plugin database is still required. It acts as the NBXplorer-compatible cache that BTCPay reads for addresses, transactions, UTXOs, balances, metadata, and PSBT inputs. The cache is derived from Floresta's local Electrum API with `blockchain.scripthash.get_history` and `blockchain.scripthash.listunspent`; `blockchain.scripthash.get_balance` is used only as a sanity check and does not replace `listunspent` as the operational UTXO source.
+- a production store you can leave unattended;
+- multisig wallets;
+- a BTCPay hot wallet;
+- wallet seed import inside BTCPay;
+- non-BTC coins.
 
-Wallet recovery is intentionally two-stage:
+## Try It With Docker
 
-- Floresta stores and validates wallet descriptors and can rescan from the configured start height.
-- The plugin stores tracked wallet metadata, derived addresses, gap indexes, local transactions, and local UTXOs.
-- Wiping the wallet UTXO cache removes local `utxos` and `transactions` only. It preserves tracked wallets, tracked addresses, gap indexes, `IsReserved` flags, and `IsUsed` flags so addresses are not reused.
-- Scanning the wallet reuses existing tracked addresses, derives only missing ranges, and rebuilds the local UTXO/transaction cache from Floresta Electrum history and unspent outputs.
+You need Docker Desktop installed.
 
-## Current Alpha Status
-
-Implemented:
-
-- standalone plugin project outside the BTCPay Server repository;
-- safe-by-default Plugin Builder install path: the plugin does not replace BTCPay's Bitcoin backend unless `FLORESTA_REPLACE_BTCPAY_BACKEND=true` is set before startup;
-- Floresta server settings page;
-- settings defaults from `FLORESTA_*` environment variables;
-- watch-only wallet setup guard that hides or blocks generated, hot-wallet, and seed-import setup paths for BTC while Floresta is active;
-- settings health panel for Electrum status/version, RPC reachability, height, best block, IBD, validated height, and Utreexo root count;
-- connection test output for Electrum version plus Floresta RPC height, best block, IBD, validation, and Utreexo root state when available;
-- configurable fee-estimation fallback through `FLORESTA_FALLBACK_FEE_SAT_PER_VB`;
-- local Floresta Electrum client with JSON-RPC line protocol, subscriptions, reconnect, and resubscribe;
-- local Floresta HTTP JSON-RPC client;
-- descriptor conversion for single-sig `wpkh`, `sh(wpkh)`, and `pkh`;
-- descriptor registration through `listdescriptors` and `loaddescriptor`;
-- optional `rescanblockchain`;
-- descriptor metadata persistence for tracked wallets;
-- wallet UTXO cache wipe and scan recovery;
-- Electrum balance sanity checks during address sync;
-- wallet tracking shim for addresses, scripthashes, transactions, UTXOs, confirmations, fees, and broadcast;
-- NBXplorer-compatible adapter/shim surface for the BTCPay on-chain pipeline;
-- Floresta status monitor and sync summary;
-- focused unit tests for Electrum scripthash, descriptor generation, chain-info parsing, fee fallback, and settings defaults;
-- Docker integration tests against real `florestad`;
-- Playwright E2E smoke test for BTCPay Server + plugin settings UI + Floresta connection.
-
-MVP limits:
-
-- BTC only;
-- single-sig only;
-- native SegWit/P2WPKH is the priority path;
-- multisig/miniscript/private key import are explicit non-goals for the MVP;
-- BTCPay generated wallet, hot wallet, and seed-import setup paths are not supported by this plugin; configure an xpub or descriptor and use an external wallet or PSBT workflow for spending;
-- no public Electrum fallback;
-- a standard BTCPay Bitcoin Core/NBXplorer installation remains unchanged unless backend replacement is explicitly enabled before startup.
-
-## Build
-
-Clone with submodules, or initialize them after cloning:
-
-```bash
-git clone --recurse-submodules <repo-url>
-git submodule update --init --recursive
-```
-
-The plugin follows the BTCPay plugin template layout: BTCPay Server is checked out under `submodules/btcpayserver`, and the plugin project references `submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj`.
-
-Build only the plugin:
-
-```bash
-dotnet build BTCPayServer.Plugins.Floresta.csproj --no-dependencies
-```
-
-Run focused unit tests. Integration and E2E tests live in the same test project and are selected by xUnit traits:
-
-```bash
-dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj --filter "Integration!=Integration&Playwright!=Playwright"
-```
-
-Run a mainnet PoC stack without Bitcoin Core, NBXplorer, or a local debug plugin mount:
+Start a test BTCPay setup with Floresta:
 
 ```bash
 docker compose -f docker-compose.release.example.yml up -d
 ```
 
-This starts BTCPay Server, Postgres, and Floresta only, with `FLORESTA_REPLACE_BTCPAY_BACKEND=true` because the compose is explicitly a Floresta backend PoC. The release compose builds the Floresta image from the upstream Git repository pinned to `v0.9.1` by default, so it does not require a local `../Floresta` checkout or float on the default branch. Set `FLORESTA_REPO` to use a local checkout, fork, or another Git URL/ref. Open BTCPay, create the first admin, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta. By default BTCPay binds to `127.0.0.1:23000`; change `BTCPAY_HOST_BIND` only when placing it behind a trusted reverse proxy or tunnel.
+This starts everything needed for a basic trial.
 
-Run integration tests against a real `florestad` in Docker:
+After it starts:
 
-```bash
-docker compose -f docker-compose.integration.yml up -d floresta
+1. Open `http://127.0.0.1:23000`.
+2. Create the first admin user.
+3. Install the Floresta plugin from Server Settings > Plugins > Available Plugins.
+4. Restart BTCPay.
+5. Open Server Settings > Floresta and configure the plugin.
 
-dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj \
-  --filter "Integration=Integration"
-
-docker compose -f docker-compose.integration.yml down -v
-```
-
-Start the full regtest infrastructure for local development:
+To stop the trial setup:
 
 ```bash
-docker compose -f docker-compose.integration.yml --profile full up -d dev
-docker compose -f docker-compose.integration.yml --profile full down -v
+docker compose -f docker-compose.release.example.yml down
 ```
 
-Run the Playwright E2E tests against BTCPay Server + real `florestad`:
+For public hosting, custom Floresta builds, or a more detailed setup guide, see [Deployment with Floresta](docs/deployment-floresta.md).
 
-```bash
-docker compose -f docker-compose.integration.yml --profile full up -d floresta postgres bitcoind utreexod
+## What Works Today
 
-dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj \
-  --filter "Playwright=Playwright"
+- Connect BTCPay Server to Floresta.
+- Watch for incoming BTC payments.
+- Connect a wallet in watch-only mode.
+- Show wallet history and balances in BTCPay.
+- Send signed Bitcoin transactions through Floresta.
+- Show Floresta connection and sync status in BTCPay.
+- Rescan wallet data if needed.
 
-docker compose -f docker-compose.integration.yml --profile full down -v
-```
+## Current Limits
 
-The integration compose only starts infrastructure; run `dotnet test` from the host to select the `Integration=Integration` or `Playwright=Playwright` trait.
+- BTC only.
+- Regular single-person wallets only.
+- The best-supported path is a standard modern Bitcoin wallet.
+- Spending should be done with an external wallet.
+- BTCPay generated wallets, hot wallets, and seed import are not supported while this backend is active.
+- Fallback to third-party Electrum servers is not supported.
 
-The `full` profile adds temporary Postgres, `bitcoind` for regtest funds/blocks, and `utreexod` as a Utreexo proof peer. These services are test-only; NBXplorer is still not started.
+## More Documentation
 
-The integration compose pins the current `dlsz/floresta` image digest by default and sets `FLORESTA_PLATFORM=linux/amd64`. Set `FLORESTA_IMAGE` to use another tag, digest, or local image. The BTCPay Server submodule must still be initialized; set `BTCPAYSERVER_REPO` if that checkout is elsewhere.
-
-Razor views compile on build so external plugin loading and Playwright E2E can exercise the actual BTCPay UI.
-
-## Backend Replacement Gate
-
-`FLORESTA_REPLACE_BTCPAY_BACKEND=true` must be present before BTCPay Server starts for the plugin to remove BTCPay's NBXplorer services and register the Floresta backend shim. Without it, the settings page is available, but BTCPay keeps using its normal configured Bitcoin backend.
-
-This startup gate is intentionally separate from the saved `UseFlorestaAsBitcoinBackend` setting. The saved setting controls the plugin once the Floresta backend mode is already enabled; it cannot turn backend replacement on after startup.
-
-## Environment Defaults
-
-The settings page can be prefilled from environment variables. Values stored in the BTCPay database still take precedence after settings are saved. `FLORESTA_REPLACE_BTCPAY_BACKEND` is not a saved setting; it is a startup-only safety gate.
-
-```text
-FLORESTA_REPLACE_BTCPAY_BACKEND=false
-FLORESTA_ENABLED=true
-FLORESTA_CRYPTO_CODE=BTC
-FLORESTA_NETWORK=mainnet
-FLORESTA_ELECTRUM_HOST=floresta
-FLORESTA_ELECTRUM_PORT=50001
-FLORESTA_ELECTRUM_TLS=false
-FLORESTA_RPC_URL=http://floresta:8332
-FLORESTA_RPC_USER=
-FLORESTA_RPC_PASSWORD=
-FLORESTA_GAP_LIMIT=100
-FLORESTA_FALLBACK_FEE_SAT_PER_VB=1
-FLORESTA_FILTERS_START_HEIGHT=0
-FLORESTA_AUTO_REGISTER_DESCRIPTORS=true
-FLORESTA_AUTO_RESCAN_ON_NEW_DESCRIPTOR=false
-FLORESTA_USE_AS_BITCOIN_BACKEND=true
-```
-
-## Floresta Methods Used
-
-RPC:
-
-- `getblockchaininfo`
-- `ping`
-- `loaddescriptor`
-- `listdescriptors`
-- `rescanblockchain`
-- `sendrawtransaction`
-
-Electrum:
-
-- `server.version`
-- `server.features`
-- `server.ping`
-- `blockchain.headers.subscribe`
-- `blockchain.scripthash.subscribe`
-- `blockchain.scripthash.get_history`
-- `blockchain.scripthash.listunspent`
-- `blockchain.scripthash.get_balance`
-- `blockchain.transaction.get`
-- `blockchain.transaction.broadcast`
-- `blockchain.estimatefee`
-
-See [docs/deployment-floresta.md](docs/deployment-floresta.md) for a deployment shape without `bitcoind` and without NBXplorer.
+- [Deployment with Floresta](docs/deployment-floresta.md) explains custom setups and public hosting.
+- [Development Guide](docs/development.md) covers building, testing, local development, settings, and Floresta APIs used by the plugin.
