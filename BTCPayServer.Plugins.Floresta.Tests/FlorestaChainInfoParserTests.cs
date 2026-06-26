@@ -33,7 +33,8 @@ public class FlorestaChainInfoParserTests
     {
         using var document = JsonDocument.Parse("""
         {
-          "blocks": "456",
+          "headers": "456",
+          "blocks": "450",
           "bestblockhash": "000000000000000000000000000000000000000000000000000000000000dcba",
           "initialblockdownload": "true"
         }
@@ -44,7 +45,7 @@ public class FlorestaChainInfoParserTests
         Assert.Equal(456, result.Height);
         Assert.Equal("000000000000000000000000000000000000000000000000000000000000dcba", result.BestBlockHash);
         Assert.True(result.IsInitialBlockDownload);
-        Assert.Null(result.ValidatedHeight);
+        Assert.Equal(450, result.ValidatedHeight);
         Assert.Null(result.UtreexoRootCount);
     }
 }

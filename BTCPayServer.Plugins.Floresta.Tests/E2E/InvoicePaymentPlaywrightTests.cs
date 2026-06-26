@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Plugins.Floresta.Services;
 using Microsoft.Playwright;
 using NBitcoin;
 using NBitcoin.RPC;
@@ -392,13 +393,13 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await EventuallyAsync(async () =>
         {
             var info = await FlorestaRpcAsync("getblockchaininfo", Array.Empty<object>());
-            var height = info.GetProperty("height").GetInt32();
-            var bestBlock = info.GetProperty("best_block").GetString();
-            var rootCount = info.GetProperty("root_count").GetInt32();
-            var validated = info.GetProperty("validated").GetInt32();
-            var ibd = info.GetProperty("ibd").GetBoolean();
-            Assert.True(height >= expectedHeight, $"Floresta height {height} is below bitcoind height {expectedHeight}");
-            Assert.Equal(expectedBestBlock, bestBlock);
+            var chainInfo = FlorestaChainInfoParser.Parse(info);
+            var rootCount = chainInfo.UtreexoRootCount ?? 0;
+            var validated = chainInfo.ValidatedHeight ?? 0;
+            var ibd = chainInfo.IsInitialBlockDownload ?? true;
+            Assert.NotNull(chainInfo.Height);
+            Assert.True(chainInfo.Height.Value >= expectedHeight, $"Floresta height {chainInfo.Height.Value} is below bitcoind height {expectedHeight}");
+            Assert.Equal(expectedBestBlock, chainInfo.BestBlockHash);
             Assert.False(ibd, "Expected Floresta to leave IBD before continuing");
             Assert.True(rootCount > 0 || validated > 0, $"Expected Floresta to expose usable Utreexo state, got root_count={rootCount}, validated={validated}");
         }, TimeSpan.FromSeconds(180), "floresta to sync to bitcoind");

@@ -2,6 +2,7 @@ using System;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Plugins.Floresta.Services;
 using NBitcoin;
 using Xunit;
 
@@ -25,11 +26,12 @@ public class FlorestaRpcIntegrationTests
 
         await _fixture.Rpc.PingAsync(cts.Token);
         var info = await _fixture.Rpc.GetBlockchainInfoAsync(cts.Token);
+        var chainInfo = FlorestaChainInfoParser.Parse(info);
 
         Assert.Equal(JsonValueKind.Object, info.ValueKind);
-        Assert.True(info.GetProperty("height").GetInt32() >= 0);
-        Assert.True(info.GetProperty("validated").GetInt32() >= 0);
-        Assert.False(string.IsNullOrWhiteSpace(info.GetProperty("best_block").GetString()));
+        Assert.True(chainInfo.Height >= 0);
+        Assert.True(chainInfo.ValidatedHeight >= 0);
+        Assert.False(string.IsNullOrWhiteSpace(chainInfo.BestBlockHash));
         Assert.Equal(_fixture.Settings.Network, info.GetProperty("chain").GetString(), ignoreCase: true);
     }
 
