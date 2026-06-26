@@ -43,7 +43,7 @@ services:
   floresta:
     build:
       context: ${FLORESTA_REPO:-../Floresta}
-      dockerfile: Dockerfile
+      dockerfile: ${FLORESTA_DOCKERFILE:-contrib/docker/Dockerfile}
     restart: unless-stopped
     command:
       - florestad
