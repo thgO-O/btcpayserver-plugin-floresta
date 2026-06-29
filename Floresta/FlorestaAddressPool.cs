@@ -25,6 +25,7 @@ internal sealed class FlorestaAddressPool
     private readonly Func<CancellationToken, Task<FlorestaSettings>> _getSettings;
     private readonly ConcurrentDictionary<string, DerivationStrategyBase> _trackedStrategies;
     private readonly SemaphoreSlim _lock = new(1, 1);
+    private const int MaxKnownWatchedDescriptorIndex = FlorestaSettings.KnownWatchedDescriptorAddressCount - 1;
 
     public FlorestaAddressPool(
         FlorestaDbContextFactory dbFactory,
@@ -60,19 +61,22 @@ internal sealed class FlorestaAddressPool
             var existing = await ctx.TrackedWallets.FindAsync(new object[] { strategyStr }, ct);
             if (existing != null)
             {
+                var autoGapIndex = GetAutoDerivedGapIndex(settings);
                 FlorestaWalletDescriptorMetadata.Apply(
                     existing,
                     descriptorRegistration,
                     descriptorRegisteredAt,
                     descriptorRegistrationError);
 
-                existing.ReceiveGapIndex = Math.Max(existing.ReceiveGapIndex, settings.GapLimit - 1);
-                existing.ChangeGapIndex = Math.Max(existing.ChangeGapIndex, settings.GapLimit - 1);
+                existing.ReceiveGapIndex = Math.Max(existing.ReceiveGapIndex, autoGapIndex);
+                existing.ChangeGapIndex = Math.Max(existing.ChangeGapIndex, autoGapIndex);
 
                 var existingHashes = await GetPrimaryWalletScripthashesAsync(ctx, strategyStr, ct);
+                var receiveGapIndex = Math.Min(existing.ReceiveGapIndex, MaxKnownWatchedDescriptorIndex);
+                var changeGapIndex = Math.Min(existing.ChangeGapIndex, MaxKnownWatchedDescriptorIndex);
 
-                var addressesToAdd = DeriveAddresses(strategy, false, 0, existing.ReceiveGapIndex + 1)
-                    .Concat(DeriveAddresses(strategy, true, 0, existing.ChangeGapIndex + 1));
+                var addressesToAdd = DeriveAddresses(strategy, false, 0, receiveGapIndex + 1)
+                    .Concat(DeriveAddresses(strategy, true, 0, changeGapIndex + 1));
                 foreach (var addr in addressesToAdd)
                 {
                     if (existingHashes.Contains(addr.Scripthash))
@@ -87,13 +91,14 @@ internal sealed class FlorestaAddressPool
                 return await FlorestaWalletTracker.GetTrackedAddressSourcesAsync(ctx, strategyStr, ct);
             }
 
+            var initialGapIndex = GetAutoDerivedGapIndex(settings);
             var wallet = new TrackedWallet
             {
                 Id = strategyStr,
                 CryptoCode = settings.CryptoCode ?? "BTC",
                 DerivationStrategy = strategyStr,
-                ReceiveGapIndex = settings.GapLimit - 1,
-                ChangeGapIndex = settings.GapLimit - 1
+                ReceiveGapIndex = initialGapIndex,
+                ChangeGapIndex = initialGapIndex
             };
             FlorestaWalletDescriptorMetadata.Apply(
                 wallet,
@@ -103,8 +108,9 @@ internal sealed class FlorestaAddressPool
 
             ctx.TrackedWallets.Add(wallet);
 
-            var addresses = DeriveAddresses(strategy, false, 0, settings.GapLimit);
-            addresses.AddRange(DeriveAddresses(strategy, true, 0, settings.GapLimit));
+            var initialAddressCount = initialGapIndex + 1;
+            var addresses = DeriveAddresses(strategy, false, 0, initialAddressCount);
+            addresses.AddRange(DeriveAddresses(strategy, true, 0, initialAddressCount));
             var addedHashes = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (var addr in addresses)
@@ -330,7 +336,9 @@ internal sealed class FlorestaAddressPool
         if (!TrackedAddressReservationPolicy.ShouldExtendGap(index, currentGapIndex, gapLimit))
             return addedAddresses;
 
-        var newGapIndex = TrackedAddressReservationPolicy.GetExtendedGapIndex(index, gapLimit);
+        var newGapIndex = Math.Min(
+            TrackedAddressReservationPolicy.GetExtendedGapIndex(index, gapLimit),
+            MaxKnownWatchedDescriptorIndex);
         var deriveFrom = currentGapIndex + 1;
         var deriveCount = newGapIndex - currentGapIndex;
         if (deriveCount <= 0)
@@ -368,8 +376,13 @@ internal sealed class FlorestaAddressPool
         _trackedStrategies[strategyStr] = strategy;
 
         var currentGapIndex = isChange ? wallet.ChangeGapIndex : wallet.ReceiveGapIndex;
+        if (currentGapIndex >= MaxKnownWatchedDescriptorIndex)
+            return addedAddresses;
+
         var deriveFrom = currentGapIndex + 1;
-        var deriveCount = Math.Max(settings.GapLimit, 1);
+        var deriveCount = Math.Min(
+            Math.Max(settings.GapLimit, 1),
+            MaxKnownWatchedDescriptorIndex - currentGapIndex);
         var newGapIndex = currentGapIndex + deriveCount;
         var existingHashes = await GetPrimaryWalletScripthashesAsync(ctx, strategyStr, ct);
 
@@ -492,6 +505,15 @@ internal sealed class FlorestaAddressPool
         return result;
     }
 
+    private static int GetAutoDerivedGapIndex(FlorestaSettings settings)
+    {
+        var addressCount = Math.Clamp(
+            settings?.GapLimit ?? 1,
+            1,
+            FlorestaSettings.KnownWatchedDescriptorAddressCount);
+        return addressCount - 1;
+    }
+
     private static async Task<TrackedAddress> GetFirstAvailableAddressAsync(
         FlorestaDbContext ctx,
         string strategyStr,
@@ -506,7 +528,9 @@ internal sealed class FlorestaAddressPool
             .ToListAsync(ct);
 
         return candidates
-            .Where(TrackedAddressReservationPolicy.IsAvailableForReservation)
+            .Where(a => TrackedAddressReservationPolicy.IsAvailableForReservationWithinRange(
+                a,
+                MaxKnownWatchedDescriptorIndex))
             .OrderBy(TrackedAddressReservationPolicy.GetKeyIndexOrMax)
             .FirstOrDefault();
     }

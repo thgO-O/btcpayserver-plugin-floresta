@@ -23,6 +23,17 @@ public class TrackedAddressReservationPolicyTests
     }
 
     [Fact]
+    public void AddressesPastKnownRangeAreNotAvailableForReservation()
+    {
+        Assert.True(TrackedAddressReservationPolicy.IsAvailableForReservationWithinRange(
+            new TrackedAddress { KeyPath = "0/99" },
+            FlorestaSettings.KnownWatchedDescriptorAddressCount - 1));
+        Assert.False(TrackedAddressReservationPolicy.IsAvailableForReservationWithinRange(
+            new TrackedAddress { KeyPath = "0/100" },
+            FlorestaSettings.KnownWatchedDescriptorAddressCount - 1));
+    }
+
+    [Fact]
     public void SortsKeyPathsByNumericIndex()
     {
         var addresses = new[]

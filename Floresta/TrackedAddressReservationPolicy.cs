@@ -7,10 +7,21 @@ internal static class TrackedAddressReservationPolicy
 {
     public static bool IsAvailableForReservation(TrackedAddress address)
     {
+        return IsAvailableForReservationCore(address, null);
+    }
+
+    public static bool IsAvailableForReservationWithinRange(TrackedAddress address, int maxKeyIndex)
+    {
+        return IsAvailableForReservationCore(address, maxKeyIndex);
+    }
+
+    private static bool IsAvailableForReservationCore(TrackedAddress address, int? maxKeyIndex)
+    {
         return address is not null &&
                !address.IsReserved &&
                !address.IsUsed &&
-               TryGetKeyIndex(address.KeyPath, out _);
+               TryGetKeyIndex(address.KeyPath, out var index) &&
+               (maxKeyIndex is null || index <= maxKeyIndex.Value);
     }
 
     public static int GetKeyIndexOrMax(TrackedAddress address)
