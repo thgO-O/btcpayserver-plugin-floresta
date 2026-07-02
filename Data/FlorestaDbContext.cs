@@ -20,6 +20,8 @@ public class FlorestaDbContext(DbContextOptions<FlorestaDbContext> options) : Db
             b.HasKey(e => e.Id);
             b.ToTable("tracked_wallets");
             b.Property(e => e.DescriptorHash).HasMaxLength(64);
+            b.Property(e => e.DescriptorStatus).HasDefaultValue(FlorestaWalletDescriptorStatus.Unknown);
+            b.Property(e => e.RescanStatus).HasDefaultValue(FlorestaWalletRescanStatus.Unknown);
         });
 
         modelBuilder.Entity<TrackedAddress>(b =>

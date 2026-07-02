@@ -150,14 +150,16 @@ public class FlorestaWalletTracker
         if (!descriptorRegistration.Succeeded)
         {
             await UpsertWalletDescriptorMetadataAsync(strategyStr, settings, descriptorRegistration, null,
-                descriptorRegistration.Error, ct);
+                descriptorRegistration.Error, ct, FlorestaWalletDescriptorMetadata.ApplyRescanNotRequested);
             throw new InvalidOperationException($"Floresta descriptor registration failed: {descriptorRegistration.Error}");
         }
 
         var descriptorRegisteredAt = settings.AutoRegisterDescriptors && descriptorRegistration.Registered > 0
             ? DateTimeOffset.UtcNow
             : (DateTimeOffset?)null;
-        await StartDescriptorRescanIfNeededAsync(settings, descriptorRegistration, ct);
+        await UpsertWalletDescriptorMetadataAsync(strategyStr, settings, descriptorRegistration, descriptorRegisteredAt,
+            null, ct);
+        await StartDescriptorRescanIfNeededAsync(strategyStr, settings, descriptorRegistration, ct);
 
         // Phase 1: derive addresses locally (fast, no network)
         var addresses = await _addressPool.EnsureAddressesDerivedAsync(
@@ -376,6 +378,7 @@ public class FlorestaWalletTracker
     }
 
     private async Task StartDescriptorRescanIfNeededAsync(
+        string strategyStr,
         FlorestaSettings settings,
         FlorestaDescriptorRegistrationResult descriptorRegistration,
         CancellationToken ct)
@@ -383,13 +386,49 @@ public class FlorestaWalletTracker
         if (!settings.AutoRegisterDescriptors ||
             descriptorRegistration.Registered == 0 ||
             !settings.AutoRescanOnNewDescriptor)
+        {
+            await UpdateWalletRescanStateAsync(
+                strategyStr,
+                settings,
+                FlorestaWalletDescriptorMetadata.ApplyRescanNotRequested,
+                ct);
             return;
+        }
 
-        await _rpcClient.RescanBlockchainAsync(
-            settings.DefaultRescanStartHeight,
-            null,
-            false,
-            "medium",
+        try
+        {
+            await _rpcClient.RescanBlockchainAsync(
+                settings.DefaultRescanStartHeight,
+                null,
+                false,
+                "medium",
+                ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            await UpdateWalletRescanStateAsync(
+                strategyStr,
+                settings,
+                (wallet, now) => FlorestaWalletDescriptorMetadata.ApplyRescanFailed(
+                    wallet,
+                    settings.DefaultRescanStartHeight,
+                    ex.Message,
+                    now),
+                ct);
+            throw;
+        }
+
+        await UpdateWalletRescanStateAsync(
+            strategyStr,
+            settings,
+            (wallet, now) => FlorestaWalletDescriptorMetadata.ApplyRescanRequested(
+                wallet,
+                settings.DefaultRescanStartHeight,
+                now),
             ct);
         _logger.LogInformation(
             "Started Floresta rescan for descriptor {DescriptorHash} from height {Height}",
@@ -403,29 +442,56 @@ public class FlorestaWalletTracker
         FlorestaDescriptorRegistrationResult descriptorRegistration,
         DateTimeOffset? descriptorRegisteredAt,
         string descriptorRegistrationError,
-        CancellationToken ct)
+        CancellationToken ct,
+        Action<TrackedWallet, DateTimeOffset> applyRescanState = null)
     {
         await using var ctx = _dbFactory.CreateContext();
-        var wallet = await ctx.TrackedWallets.FindAsync(new object[] { strategyStr }, ct);
-        if (wallet == null)
-        {
-            wallet = new TrackedWallet
-            {
-                Id = strategyStr,
-                CryptoCode = settings.CryptoCode ?? "BTC",
-                DerivationStrategy = strategyStr,
-                ReceiveGapIndex = settings.GapLimit - 1,
-                ChangeGapIndex = settings.GapLimit - 1
-            };
-            ctx.TrackedWallets.Add(wallet);
-        }
+        var wallet = await GetOrCreateWalletAsync(ctx, strategyStr, settings, ct);
+        var now = DateTimeOffset.UtcNow;
 
         FlorestaWalletDescriptorMetadata.Apply(
             wallet,
             descriptorRegistration,
             descriptorRegisteredAt,
-            descriptorRegistrationError);
+            descriptorRegistrationError,
+            settings.AutoRegisterDescriptors,
+            now);
+        applyRescanState?.Invoke(wallet, now);
         await ctx.SaveChangesAsync(ct);
+    }
+
+    private async Task UpdateWalletRescanStateAsync(
+        string strategyStr,
+        FlorestaSettings settings,
+        Action<TrackedWallet, DateTimeOffset> applyRescanState,
+        CancellationToken ct)
+    {
+        await using var ctx = _dbFactory.CreateContext();
+        var wallet = await GetOrCreateWalletAsync(ctx, strategyStr, settings, ct);
+        applyRescanState(wallet, DateTimeOffset.UtcNow);
+        await ctx.SaveChangesAsync(ct);
+    }
+
+    private static async Task<TrackedWallet> GetOrCreateWalletAsync(
+        FlorestaDbContext ctx,
+        string strategyStr,
+        FlorestaSettings settings,
+        CancellationToken ct)
+    {
+        var wallet = await ctx.TrackedWallets.FindAsync(new object[] { strategyStr }, ct);
+        if (wallet != null)
+            return wallet;
+
+        wallet = new TrackedWallet
+        {
+            Id = strategyStr,
+            CryptoCode = settings.CryptoCode ?? "BTC",
+            DerivationStrategy = strategyStr,
+            ReceiveGapIndex = settings.GapLimit - 1,
+            ChangeGapIndex = settings.GapLimit - 1
+        };
+        ctx.TrackedWallets.Add(wallet);
+        return wallet;
     }
 
     public async Task<List<NewTransactionInfo>> HandleScripthashNotificationAsync(
@@ -749,14 +815,16 @@ public class FlorestaWalletTracker
         if (!descriptorRegistration.Succeeded)
         {
             await UpsertWalletDescriptorMetadataAsync(strategyStr, settings, descriptorRegistration, null,
-                descriptorRegistration.Error, ct);
+                descriptorRegistration.Error, ct, FlorestaWalletDescriptorMetadata.ApplyRescanNotRequested);
             throw new InvalidOperationException($"Floresta descriptor registration failed: {descriptorRegistration.Error}");
         }
 
         var descriptorRegisteredAt = settings.AutoRegisterDescriptors && descriptorRegistration.Registered > 0
             ? DateTimeOffset.UtcNow
             : (DateTimeOffset?)null;
-        await StartDescriptorRescanIfNeededAsync(settings, descriptorRegistration, ct);
+        await UpsertWalletDescriptorMetadataAsync(strategyStr, settings, descriptorRegistration, descriptorRegisteredAt,
+            null, ct);
+        await StartDescriptorRescanIfNeededAsync(strategyStr, settings, descriptorRegistration, ct);
 
         var newAddresses = await _addressPool.EnsureScanAddressesAsync(
             strategyStr,

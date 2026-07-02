@@ -1,4 +1,5 @@
 using System;
+using BTCPayServer.Plugins.Floresta;
 
 namespace BTCPayServer.Plugins.Floresta.Data;
 
@@ -15,6 +16,13 @@ public class TrackedWallet
     public string ChangeDescriptor { get; set; }
     public DateTimeOffset? DescriptorRegisteredAt { get; set; }
     public string DescriptorRegistrationError { get; set; }
+    public string DescriptorStatus { get; set; } = FlorestaWalletDescriptorStatus.Unknown;
+    public DateTimeOffset? DescriptorStatusUpdatedAt { get; set; }
+    public string RescanStatus { get; set; } = FlorestaWalletRescanStatus.Unknown;
+    public DateTimeOffset? RescanStatusUpdatedAt { get; set; }
+    public DateTimeOffset? RescanRequestedAt { get; set; }
+    public int? RescanStartHeight { get; set; }
+    public string RescanError { get; set; }
 }
 
 public class TrackedAddress

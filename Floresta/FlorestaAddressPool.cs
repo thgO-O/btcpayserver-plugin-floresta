@@ -66,7 +66,9 @@ internal sealed class FlorestaAddressPool
                     existing,
                     descriptorRegistration,
                     descriptorRegisteredAt,
-                    descriptorRegistrationError);
+                    descriptorRegistrationError,
+                    settings.AutoRegisterDescriptors,
+                    DateTimeOffset.UtcNow);
 
                 existing.ReceiveGapIndex = Math.Max(existing.ReceiveGapIndex, autoGapIndex);
                 existing.ChangeGapIndex = Math.Max(existing.ChangeGapIndex, autoGapIndex);
@@ -104,7 +106,9 @@ internal sealed class FlorestaAddressPool
                 wallet,
                 descriptorRegistration,
                 descriptorRegisteredAt,
-                descriptorRegistrationError);
+                descriptorRegistrationError,
+                settings.AutoRegisterDescriptors,
+                DateTimeOffset.UtcNow);
 
             ctx.TrackedWallets.Add(wallet);
 
@@ -259,14 +263,26 @@ internal sealed class FlorestaAddressPool
                     ReceiveGapIndex = startingIndex + gapLimit - 1,
                     ChangeGapIndex = startingIndex + gapLimit - 1
                 };
-                FlorestaWalletDescriptorMetadata.Apply(wallet, descriptorRegistration, descriptorRegisteredAt, null);
+                FlorestaWalletDescriptorMetadata.Apply(
+                    wallet,
+                    descriptorRegistration,
+                    descriptorRegisteredAt,
+                    null,
+                    settings.AutoRegisterDescriptors,
+                    DateTimeOffset.UtcNow);
                 ctx.TrackedWallets.Add(wallet);
             }
             else
             {
                 wallet.ReceiveGapIndex = Math.Max(wallet.ReceiveGapIndex, startingIndex + gapLimit - 1);
                 wallet.ChangeGapIndex = Math.Max(wallet.ChangeGapIndex, startingIndex + gapLimit - 1);
-                FlorestaWalletDescriptorMetadata.Apply(wallet, descriptorRegistration, descriptorRegisteredAt, null);
+                FlorestaWalletDescriptorMetadata.Apply(
+                    wallet,
+                    descriptorRegistration,
+                    descriptorRegisteredAt,
+                    null,
+                    settings.AutoRegisterDescriptors,
+                    DateTimeOffset.UtcNow);
             }
 
             var existingHashes = await GetPrimaryWalletScripthashesAsync(ctx, strategyStr, ct);
