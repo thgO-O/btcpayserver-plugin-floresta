@@ -384,7 +384,6 @@ public class FlorestaWalletTracker
         CancellationToken ct)
     {
         if (!settings.AutoRegisterDescriptors ||
-            descriptorRegistration.Registered == 0 ||
             !settings.AutoRescanOnNewDescriptor)
         {
             await UpdateWalletRescanStateAsync(
@@ -394,6 +393,9 @@ public class FlorestaWalletTracker
                 ct);
             return;
         }
+
+        if (descriptorRegistration.Registered == 0)
+            return;
 
         try
         {
