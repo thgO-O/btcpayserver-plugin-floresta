@@ -205,11 +205,36 @@ namespace BTCPayServer.Plugins.Floresta.Migrations
                 b.Property<string>("DescriptorRegistrationError")
                     .HasColumnType("text");
 
+                b.Property<string>("DescriptorStatus")
+                    .IsRequired()
+                    .HasColumnType("text")
+                    .HasDefaultValue("Unknown");
+
+                b.Property<DateTimeOffset?>("DescriptorStatusUpdatedAt")
+                    .HasColumnType("timestamp with time zone");
+
                 b.Property<string>("ReceiveDescriptor")
                     .HasColumnType("text");
 
                 b.Property<int>("ReceiveGapIndex")
                     .HasColumnType("integer");
+
+                b.Property<string>("RescanError")
+                    .HasColumnType("text");
+
+                b.Property<DateTimeOffset?>("RescanRequestedAt")
+                    .HasColumnType("timestamp with time zone");
+
+                b.Property<int?>("RescanStartHeight")
+                    .HasColumnType("integer");
+
+                b.Property<string>("RescanStatus")
+                    .IsRequired()
+                    .HasColumnType("text")
+                    .HasDefaultValue("Unknown");
+
+                b.Property<DateTimeOffset?>("RescanStatusUpdatedAt")
+                    .HasColumnType("timestamp with time zone");
 
                 b.HasKey("Id");
 

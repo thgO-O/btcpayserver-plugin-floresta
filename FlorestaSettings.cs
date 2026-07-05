@@ -46,6 +46,7 @@ public class FlorestaSettings
     }
 
     public const int MaxGapLimit = 1000;
+    public const int KnownWatchedDescriptorAddressCount = 100;
     private int _gapLimit = 100;
     public int GapLimit
     {
