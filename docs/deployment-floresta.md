@@ -127,7 +127,7 @@ UseFlorestaAsBitcoinBackend=true
 
 The plugin is watch-only. When Floresta is active for BTC, the BTCPay generated wallet, hot-wallet, generated watch-only wallet, and seed-import setup paths are hidden or redirected to xpub import. Configure an existing xpub or descriptor and spend from an external wallet or PSBT workflow.
 
-The settings page includes a health panel showing the current Electrum status/version, RPC reachability, chain height, best block, IBD state, validated height, and Utreexo root count. Use Test Connection for an immediate live check after changing endpoints.
+The settings page includes a health panel showing the current Electrum status/version, RPC reachability, chain height, best block, IBD state, and validated height. Use Test Connection for an immediate live check after changing endpoints.
 
 `FLORESTA_FALLBACK_FEE_SAT_PER_VB` controls the static fee rate used when `blockchain.estimatefee` is unavailable or invalid and no cached estimate exists. Successful estimates are clamped to at least this value. The default is `1 sat/vB`.
 
