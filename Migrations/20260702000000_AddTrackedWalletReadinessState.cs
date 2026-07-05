@@ -1,6 +1,4 @@
 using System;
-using BTCPayServer.Plugins.Floresta.Data;
-using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -8,8 +6,6 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace BTCPayServer.Plugins.Floresta.Migrations
 {
     /// <inheritdoc />
-    [DbContext(typeof(FlorestaDbContext))]
-    [Migration("20260702000000_AddTrackedWalletReadinessState")]
     public partial class AddTrackedWalletReadinessState : Migration
     {
         /// <inheritdoc />
