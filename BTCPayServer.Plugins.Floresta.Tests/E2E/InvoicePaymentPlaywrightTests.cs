@@ -144,13 +144,19 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         {
             if (_page is not null)
                 await _page.CloseAsync();
-            if (_browser is not null)
-                await _browser.CloseAsync();
         }
         finally
         {
-            _playwright?.Dispose();
-            await UnloadBitcoinWalletAsync();
+            try
+            {
+                if (_browser is not null)
+                    await _browser.CloseAsync();
+            }
+            finally
+            {
+                _playwright?.Dispose();
+                await UnloadBitcoinWalletAsync();
+            }
         }
     }
 
