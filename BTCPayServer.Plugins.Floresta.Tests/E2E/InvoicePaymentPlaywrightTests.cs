@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Plugins.Floresta.Services;
 using Microsoft.Playwright;
 using NBitcoin;
 using NBitcoin.RPC;
@@ -20,6 +21,8 @@ namespace BTCPayServer.Plugins.Floresta.Tests.E2E;
 [Collection(FlorestaE2ECollection.Name)]
 public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 {
+    private const string BitcoinWalletName = "floresta-e2e";
+
     private const string WalletSeedMnemonic =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
@@ -137,11 +140,24 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        if (_page is not null)
-            await _page.CloseAsync();
-        if (_browser is not null)
-            await _browser.CloseAsync();
-        _playwright?.Dispose();
+        try
+        {
+            if (_page is not null)
+                await _page.CloseAsync();
+        }
+        finally
+        {
+            try
+            {
+                if (_browser is not null)
+                    await _browser.CloseAsync();
+            }
+            finally
+            {
+                _playwright?.Dispose();
+                await UnloadBitcoinWalletAsync();
+            }
+        }
     }
 
     private static RPCClient CreateBitcoinRpcClient()
@@ -167,9 +183,9 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
     {
         try
         {
-            return await rpc.CreateWalletAsync("floresta-e2e", new CreateWalletOptions
+            return await rpc.CreateWalletAsync(BitcoinWalletName, new CreateWalletOptions
             {
-                LoadOnStartup = true,
+                LoadOnStartup = false,
                 Descriptors = true
             });
         }
@@ -179,11 +195,30 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
         try
         {
-            return await rpc.LoadWalletAsync("floresta-e2e", true);
+            return await rpc.LoadWalletAsync(BitcoinWalletName, false);
         }
         catch (RPCException ex) when (ex.Message.Contains("already loaded", StringComparison.OrdinalIgnoreCase))
         {
-            return rpc.SetWalletContext("floresta-e2e");
+            return rpc.SetWalletContext(BitcoinWalletName);
+        }
+    }
+
+    private static async Task UnloadBitcoinWalletAsync()
+    {
+        try
+        {
+            await CreateBitcoinRpcClient().UnloadWalletAsync(BitcoinWalletName, false);
+        }
+        catch (RPCException ex) when (
+            ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
+            ex.Message.Contains("is not loaded", StringComparison.OrdinalIgnoreCase))
+        {
+        }
+        catch (HttpRequestException)
+        {
+        }
+        catch (OperationCanceledException)
+        {
         }
     }
 
@@ -392,13 +427,13 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await EventuallyAsync(async () =>
         {
             var info = await FlorestaRpcAsync("getblockchaininfo", Array.Empty<object>());
-            var height = info.GetProperty("height").GetInt32();
-            var bestBlock = info.GetProperty("best_block").GetString();
-            var rootCount = info.GetProperty("root_count").GetInt32();
-            var validated = info.GetProperty("validated").GetInt32();
-            var ibd = info.GetProperty("ibd").GetBoolean();
-            Assert.True(height >= expectedHeight, $"Floresta height {height} is below bitcoind height {expectedHeight}");
-            Assert.Equal(expectedBestBlock, bestBlock);
+            var chainInfo = FlorestaChainInfoParser.Parse(info);
+            var rootCount = chainInfo.UtreexoRootCount ?? 0;
+            var validated = chainInfo.ValidatedHeight ?? 0;
+            var ibd = chainInfo.IsInitialBlockDownload ?? true;
+            Assert.NotNull(chainInfo.Height);
+            Assert.True(chainInfo.Height.Value >= expectedHeight, $"Floresta height {chainInfo.Height.Value} is below bitcoind height {expectedHeight}");
+            Assert.Equal(expectedBestBlock, chainInfo.BestBlockHash);
             Assert.False(ibd, "Expected Floresta to leave IBD before continuing");
             Assert.True(rootCount > 0 || validated > 0, $"Expected Floresta to expose usable Utreexo state, got root_count={rootCount}, validated={validated}");
         }, TimeSpan.FromSeconds(180), "floresta to sync to bitcoind");

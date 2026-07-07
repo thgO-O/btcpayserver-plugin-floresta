@@ -127,7 +127,7 @@ UseFlorestaAsBitcoinBackend=true
 
 The plugin is watch-only. When Floresta is active for BTC, the BTCPay generated wallet, hot-wallet, generated watch-only wallet, and seed-import setup paths are hidden or redirected to xpub import. Configure an existing xpub or descriptor and spend from an external wallet or PSBT workflow.
 
-The settings page includes a health panel showing the current Electrum status/version, RPC reachability, chain height, best block, IBD state, validated height, and Utreexo root count. Use Test Connection for an immediate live check after changing endpoints.
+The settings page includes a health panel showing the current Electrum status/version, RPC reachability, chain height, best block, IBD state, and validated height. Use Test Connection for an immediate live check after changing endpoints.
 
 `FLORESTA_FALLBACK_FEE_SAT_PER_VB` controls the static fee rate used when `blockchain.estimatefee` is unavailable or invalid and no cached estimate exists. Successful estimates are clamped to at least this value. The default is `1 sat/vB`.
 
@@ -194,11 +194,11 @@ For a mainnet package-install PoC, use [docker-compose.release.example.yml](../d
 docker compose -f docker-compose.release.example.yml up -d
 ```
 
-This compose starts BTCPay Server, Postgres, and Floresta only. It does not mount a local plugin build, and it builds the Floresta image from the upstream Git repository pinned to `v0.9.1` by default instead of requiring a local `../Floresta` checkout or floating on the default branch. Set `FLORESTA_REPO` to a local checkout, fork, or another Git URL/ref when you need to pin a different tree. It sets `FLORESTA_REPLACE_BTCPAY_BACKEND=true` because this stack is explicitly a Floresta backend PoC. After BTCPay starts, create the first admin account, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta.
+This compose starts BTCPay Server, Postgres, and Floresta only. It does not mount a local plugin build, and it builds the Floresta image from the upstream Git repository pinned to `v0.9.1` by default instead of requiring a local `../Floresta` checkout or floating on the default branch. Set `FLORESTA_REPO` to a local checkout, fork, or another Git URL/ref when you need to pin a different tree. If that tree uses the newer upstream layout, also set `FLORESTA_DOCKERFILE=contrib/docker/Dockerfile`; the pinned `v0.9.1` default still uses `Dockerfile`. It sets `FLORESTA_REPLACE_BTCPAY_BACKEND=true` because this stack is explicitly a Floresta backend PoC. After BTCPay starts, create the first admin account, install the Floresta plugin from Server Settings > Plugins > Available Plugins, restart BTCPay, then configure Server Settings > Floresta.
 
 By default the BTCPay HTTP port is bound to `127.0.0.1:23000`. Set `BTCPAY_HOST_BIND=0.0.0.0` only when publishing it behind a trusted reverse proxy, VPN, or tunnel.
 
-[docker-compose.local-mainnet.yml](../docker-compose.local-mainnet.yml) is for local development and mounts `./bin/Debug/net10.0` into BTCPay's plugin directory.
+[docker-compose.local-mainnet.yml](../docker-compose.local-mainnet.yml) is for local development and mounts `./bin/Debug/net10.0` into BTCPay's plugin directory. It defaults to the current Floresta source layout and builds `contrib/docker/Dockerfile` from `../Floresta`; set `FLORESTA_DOCKERFILE=Dockerfile` when using an older Floresta tag.
 
 Both examples keep Floresta RPC/Electrum internal to the Docker network. Expose those ports only for local development and only to trusted networks.
 

@@ -31,10 +31,10 @@ internal static class FlorestaChainInfoParser
     public static FlorestaChainInfo Parse(JsonElement blockchainInfo)
     {
         return new FlorestaChainInfo(
-            GetInt32(blockchainInfo, "height") ?? GetInt32(blockchainInfo, "blocks"),
+            GetInt32(blockchainInfo, "height") ?? GetInt32(blockchainInfo, "headers") ?? GetInt32(blockchainInfo, "blocks"),
             GetString(blockchainInfo, "best_block") ?? GetString(blockchainInfo, "bestblockhash"),
             GetBool(blockchainInfo, "ibd") ?? GetBool(blockchainInfo, "initialblockdownload"),
-            GetInt32(blockchainInfo, "validated"),
+            GetInt32(blockchainInfo, "validated") ?? GetInt32(blockchainInfo, "blocks"),
             GetInt32(blockchainInfo, "root_count"));
     }
 
