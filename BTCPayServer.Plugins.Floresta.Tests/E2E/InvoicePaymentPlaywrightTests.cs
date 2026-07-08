@@ -13,6 +13,7 @@ using BTCPayServer.Plugins.Floresta.Services;
 using Microsoft.Playwright;
 using NBitcoin;
 using NBitcoin.RPC;
+using Npgsql;
 using static Microsoft.Playwright.Assertions;
 using Xunit;
 
@@ -38,7 +39,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         _server = server;
     }
 
-    [Fact(Timeout = 360_000)]
+    [Fact(Timeout = 900_000)]
     [Trait("Playwright", "Playwright")]
     public async Task BTCPayInvoiceCanBePaidAndSpentThroughFlorestaWallet()
     {
@@ -64,46 +65,39 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await AddWatchOnlyWallet(page, storeId);
         await WaitForDescriptorsAsync();
 
-        var invoiceAmount = Money.Coins(0.001m);
-        var invoiceId = await CreateInvoice(page, storeId, "0.00100000", "BTC");
-        await page.GotoAsync(new Uri(_server.ServerUri, $"/i/{invoiceId}").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
-        await AssertNoUiError(page);
-
-        var invoiceAddress = await page.Locator("#Address_BTC-CHAIN .truncate-center").GetAttributeAsync("data-text");
-        Assert.False(string.IsNullOrWhiteSpace(invoiceAddress));
-
-        var txId = await bitcoinWallet.SendToAddressAsync(BitcoinAddress.Create(invoiceAddress!, Network.RegTest), invoiceAmount);
-        var rawTx = await bitcoin.GetRawTransactionAsync(txId);
-        await FlorestaRpcAsync("sendrawtransaction", new object[] { rawTx.ToHex() });
-        await bitcoinWallet.GenerateToAddressAsync(1, await bitcoinWallet.GetNewAddressAsync());
-        await SubmitBitcoinChainToUtreexodAsync(bitcoin);
-        await RefreshFlorestaUtreexoPeerAsync();
-        await WaitForUtreexodChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
-        await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
-
-        await EventuallyAsync(async () =>
-        {
-            await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.Commit });
-            await AssertNoUiError(page);
-            var settled = page.Locator("#settled");
-            await settled.WaitForAsync(new LocatorWaitForOptions { Timeout = 5_000 });
-            await Expect(settled).ToContainTextAsync("Invoice Paid", new LocatorAssertionsToContainTextOptions { Timeout = 5_000 });
-        }, TimeSpan.FromSeconds(120), "invoice to become settled");
-
         var walletUrl = new Uri(_server.ServerUri, $"/wallets/S-{storeId}-BTC?loadTransactions=true").ToString();
-        await page.GotoAsync(walletUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
-        await AssertNoUiError(page);
+        var strategy = GetWalletAccountKey();
 
-        await EventuallyAsync(async () =>
-        {
-            var response = await page.GotoAsync(walletUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
-            Assert.True(response?.Ok, $"Wallet page returned HTTP {response?.Status} at {page.Url}");
-            await AssertNoUiError(page);
+        var txId = await PayInvoiceAndWaitAsync(page, storeId, bitcoin, bitcoinWallet, "0.00100000", Money.Coins(0.001m));
+        await AssertWalletTransactionVisibleAsync(page, walletUrl, txId, "0.00100000");
 
-            var row = page.Locator($"tr.transaction-row[data-value='{txId}']");
-            await Expect(row).ToBeVisibleAsync(new LocatorAssertionsToBeVisibleOptions { Timeout = 5_000 });
-            await Expect(row).ToContainTextAsync("0.00100000", new LocatorAssertionsToContainTextOptions { Timeout = 5_000 });
-        }, TimeSpan.FromSeconds(120), "wallet balance transaction to appear");
+        await AssertWalletCacheCanBeRebuiltAsync(page, storeId, txId);
+
+        var beforeBtcpayRestart = await ReadWalletCacheSnapshotAsync(strategy, txId.ToString());
+        await _server.RestartAsync();
+        await WaitForBtcpayFlorestaBackendAsync(page, await bitcoin.GetBlockCountAsync());
+        await AssertWalletSnapshotPreservedAsync(strategy, txId, beforeBtcpayRestart);
+        await AssertWalletTransactionVisibleAsync(page, walletUrl, txId, "0.00100000");
+
+        var postBtcpayRestartTxId = await PayInvoiceAndWaitAsync(page, storeId, bitcoin, bitcoinWallet, "0.00070000", Money.Coins(0.0007m));
+        await AssertWalletTransactionVisibleAsync(page, walletUrl, postBtcpayRestartTxId, "0.00070000");
+
+        await AssertInterruptedWalletScanCanResumeAsync(
+            page,
+            storeId,
+            await bitcoin.GetBlockCountAsync(),
+            txId,
+            postBtcpayRestartTxId);
+
+        await RestartFlorestaServiceAsync();
+        await ConnectRegtestMeshAsync(bitcoin);
+        await RefreshFlorestaUtreexoPeerAsync();
+        await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
+        await WaitForBtcpayFlorestaBackendAsync(page, await bitcoin.GetBlockCountAsync());
+
+        var postFlorestaRestartTxId = await PayInvoiceAndWaitAsync(page, storeId, bitcoin, bitcoinWallet, "0.00060000", Money.Coins(0.0006m));
+        await AssertWalletTransactionVisibleAsync(page, walletUrl, postFlorestaRestartTxId, "0.00060000");
+        await AssertKnownPaymentsRemainActiveAsync(strategy, txId, postBtcpayRestartTxId, postFlorestaRestartTxId);
 
         var spendTxId = await SpendFromBtcpayWalletWithSeed(page, storeId, bitcoinWallet);
         await WaitForBitcoinMempoolAsync(bitcoin, spendTxId);
@@ -113,16 +107,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await WaitForUtreexodChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
         await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
 
-        await EventuallyAsync(async () =>
-        {
-            var response = await page.GotoAsync(walletUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
-            Assert.True(response?.Ok, $"Wallet page returned HTTP {response?.Status} at {page.Url}");
-            await AssertNoUiError(page);
-
-            var row = page.Locator($"tr.transaction-row[data-value='{spendTxId}']");
-            await Expect(row).ToBeVisibleAsync(new LocatorAssertionsToBeVisibleOptions { Timeout = 5_000 });
-            await Expect(row.Locator(".amount-col")).ToContainTextAsync("-", new LocatorAssertionsToContainTextOptions { Timeout = 5_000 });
-        }, TimeSpan.FromSeconds(120), "BTCPay wallet spend transaction to appear");
+        await AssertWalletTransactionVisibleAsync(page, walletUrl, spendTxId, amountShouldBeNegative: true);
     }
 
     public async Task InitializeAsync()
@@ -269,6 +254,11 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
     private static string? RunProcess(string fileName, params string[] args)
     {
+        return RunProcess(TimeSpan.FromSeconds(5), fileName, args);
+    }
+
+    private static string? RunProcess(TimeSpan timeout, string fileName, params string[] args)
+    {
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo(fileName)
@@ -285,7 +275,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         process.Start();
         var output = process.StandardOutput.ReadToEndAsync();
         var error = process.StandardError.ReadToEndAsync();
-        if (!process.WaitForExit(5_000))
+        if (!process.WaitForExit((int)timeout.TotalMilliseconds))
         {
             process.Kill(entireProcessTree: true);
             return null;
@@ -293,6 +283,25 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
         _ = error.GetAwaiter().GetResult();
         return process.ExitCode == 0 ? output.GetAwaiter().GetResult() : null;
+    }
+
+    private static async Task RestartFlorestaServiceAsync()
+    {
+        var composeFile = Path.Combine(GetRepoRoot(), "docker-compose.integration.yml");
+        var output = RunProcess(
+            TimeSpan.FromSeconds(60),
+            "docker",
+            "compose",
+            "-f",
+            composeFile,
+            "restart",
+            "floresta");
+        Assert.NotNull(output);
+
+        await EventuallyAsync(async () =>
+        {
+            await FlorestaRpcAsync("ping", Array.Empty<object>());
+        }, TimeSpan.FromSeconds(120), "Floresta RPC to recover after Docker restart");
     }
 
     private static string GetRepoRoot()
@@ -584,8 +593,386 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await page.Locator("#RpcUrl").FillAsync(rpcUrl);
         await page.Locator("#GapLimit").FillAsync("100");
         await page.Locator("#DefaultRescanStartHeight").FillAsync("0");
+        await page.Locator("#AutoRegisterDescriptors").SetCheckedAsync(true, new LocatorSetCheckedOptions { Force = true });
+        await page.Locator("#AutoRescanOnNewDescriptor").SetCheckedAsync(true, new LocatorSetCheckedOptions { Force = true });
         await page.Locator("#UseFlorestaAsBitcoinBackend").SetCheckedAsync(true, new LocatorSetCheckedOptions { Force = true });
         await page.Locator("#SaveFlorestaSettings").ClickAsync();
+    }
+
+    private async Task<uint256> PayInvoiceAndWaitAsync(
+        IPage page,
+        string storeId,
+        RPCClient bitcoin,
+        RPCClient bitcoinWallet,
+        string displayAmount,
+        Money invoiceAmount)
+    {
+        var invoiceId = await CreateInvoice(page, storeId, displayAmount, "BTC");
+        await page.GotoAsync(new Uri(_server.ServerUri, $"/i/{invoiceId}").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
+        await AssertNoUiError(page);
+
+        var invoiceAddress = await page.Locator("#Address_BTC-CHAIN .truncate-center").GetAttributeAsync("data-text");
+        Assert.False(string.IsNullOrWhiteSpace(invoiceAddress));
+
+        var txId = await bitcoinWallet.SendToAddressAsync(BitcoinAddress.Create(invoiceAddress!, Network.RegTest), invoiceAmount);
+        var rawTx = await bitcoin.GetRawTransactionAsync(txId);
+        await FlorestaRpcAsync("sendrawtransaction", new object[] { rawTx.ToHex() });
+        await bitcoinWallet.GenerateToAddressAsync(1, await bitcoinWallet.GetNewAddressAsync());
+        await SubmitBitcoinChainToUtreexodAsync(bitcoin);
+        await RefreshFlorestaUtreexoPeerAsync();
+        await WaitForUtreexodChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
+        await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
+        await WaitForInvoiceSettledAsync(page);
+        return txId;
+    }
+
+    private static async Task WaitForInvoiceSettledAsync(IPage page)
+    {
+        await EventuallyAsync(async () =>
+        {
+            await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.Commit });
+            await AssertNoUiError(page);
+            var settled = page.Locator("#settled");
+            await settled.WaitForAsync(new LocatorWaitForOptions { Timeout = 5_000 });
+            await Expect(settled).ToContainTextAsync("Invoice Paid", new LocatorAssertionsToContainTextOptions { Timeout = 5_000 });
+        }, TimeSpan.FromSeconds(120), "invoice to become settled");
+    }
+
+    private static async Task AssertWalletTransactionVisibleAsync(
+        IPage page,
+        string walletUrl,
+        uint256 txId,
+        string? expectedText = null,
+        bool amountShouldBeNegative = false)
+    {
+        await EventuallyAsync(async () =>
+        {
+            var response = await page.GotoAsync(walletUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
+            Assert.True(response?.Ok, $"Wallet page returned HTTP {response?.Status} at {page.Url}");
+            await AssertNoUiError(page);
+
+            var row = page.Locator($"tr.transaction-row[data-value='{txId}']");
+            await Expect(row).ToBeVisibleAsync(new LocatorAssertionsToBeVisibleOptions { Timeout = 5_000 });
+            if (expectedText is not null)
+                await Expect(row).ToContainTextAsync(expectedText, new LocatorAssertionsToContainTextOptions { Timeout = 5_000 });
+            if (amountShouldBeNegative)
+                await Expect(row.Locator(".amount-col")).ToContainTextAsync("-", new LocatorAssertionsToContainTextOptions { Timeout = 5_000 });
+        }, TimeSpan.FromSeconds(120), $"wallet transaction {txId} to appear");
+    }
+
+    private async Task AssertWalletCacheCanBeRebuiltAsync(IPage page, string storeId, uint256 txId)
+    {
+        var walletRouteId = $"S-{storeId}-BTC";
+        var strategy = GetWalletAccountKey();
+        var txHash = txId.ToString();
+
+        var before = await EventuallyAsync(async () =>
+        {
+            var snapshot = await ReadWalletCacheSnapshotAsync(strategy, txHash);
+            Assert.Equal(FlorestaWalletDescriptorStatus.Registered, snapshot.DescriptorStatus);
+            Assert.Equal(FlorestaWalletRescanStatus.Requested, snapshot.RescanStatus);
+            Assert.True(snapshot.HasRescanRequestedAt);
+            Assert.Equal(0, snapshot.RescanStartHeight);
+            Assert.Null(snapshot.RescanError);
+            Assert.True(snapshot.AddressCount > 0);
+            Assert.True(snapshot.ReservedAddressCount > 0);
+            Assert.True(snapshot.UsedAddressCount > 0);
+            Assert.True(snapshot.UtxoCount > 0);
+            Assert.True(snapshot.TransactionCount > 0);
+            Assert.True(snapshot.PaymentTransactionCount > 0);
+            Assert.True(snapshot.PaymentUtxoCount > 0);
+            Assert.True(snapshot.PaymentUtxoValue > 0);
+            return snapshot;
+        }, TimeSpan.FromSeconds(60), "Floresta wallet cache to contain the paid invoice transaction");
+
+        await WipeWalletCacheAsync(page, walletRouteId);
+
+        await EventuallyAsync(async () =>
+        {
+            var snapshot = await ReadWalletCacheSnapshotAsync(strategy, txHash);
+            Assert.Equal(before.AddressCount, snapshot.AddressCount);
+            Assert.Equal(before.ReservedAddressCount, snapshot.ReservedAddressCount);
+            Assert.Equal(before.UsedAddressCount, snapshot.UsedAddressCount);
+            Assert.Equal(before.ReceiveGapIndex, snapshot.ReceiveGapIndex);
+            Assert.Equal(before.ChangeGapIndex, snapshot.ChangeGapIndex);
+            Assert.Equal(before.DescriptorStatus, snapshot.DescriptorStatus);
+            Assert.Equal(before.RescanStatus, snapshot.RescanStatus);
+            Assert.Equal(before.RescanStartHeight, snapshot.RescanStartHeight);
+            Assert.Equal(before.RescanError, snapshot.RescanError);
+            Assert.Equal(0, snapshot.UtxoCount);
+            Assert.Equal(0, snapshot.TransactionCount);
+        }, TimeSpan.FromSeconds(60), "Floresta wallet cache wipe to remove only transactions and UTXOs");
+
+        await StartWalletRescanAsync(page, walletRouteId);
+
+        WalletCacheSnapshot after;
+        try
+        {
+            after = await EventuallyAsync(async () =>
+            {
+                var snapshot = await ReadWalletCacheSnapshotAsync(strategy, txHash);
+                Assert.Equal(before.AddressCount, snapshot.AddressCount);
+                Assert.Equal(before.ReservedAddressCount, snapshot.ReservedAddressCount);
+                Assert.Equal(before.UsedAddressCount, snapshot.UsedAddressCount);
+                Assert.Equal(before.ReceiveGapIndex, snapshot.ReceiveGapIndex);
+                Assert.Equal(before.ChangeGapIndex, snapshot.ChangeGapIndex);
+                Assert.Equal(before.DescriptorStatus, snapshot.DescriptorStatus);
+                Assert.Equal(before.RescanStatus, snapshot.RescanStatus);
+                Assert.Equal(before.RescanStartHeight, snapshot.RescanStartHeight);
+                Assert.Equal(before.RescanError, snapshot.RescanError);
+                Assert.Equal(before.TransactionCount, snapshot.TransactionCount);
+                Assert.Equal(before.UtxoCount, snapshot.UtxoCount);
+                Assert.Equal(1, snapshot.PaymentTransactionCount);
+                Assert.Equal(1, snapshot.PaymentUtxoCount);
+                Assert.Equal(before.PaymentUtxoValue, snapshot.PaymentUtxoValue);
+                return snapshot;
+            }, TimeSpan.FromSeconds(120), "Floresta wallet scan to rebuild the wiped payment cache");
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException($"{ex.Message}\n\nBTCPay output tail:\n{GetTail(_server.Output, 120)}", ex);
+        }
+
+        Assert.Equal(before.HasRescanRequestedAt, after.HasRescanRequestedAt);
+
+        var walletUrl = new Uri(_server.ServerUri, $"/wallets/{walletRouteId}?loadTransactions=true").ToString();
+        await EventuallyAsync(async () =>
+        {
+            var response = await page.GotoAsync(walletUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
+            Assert.True(response?.Ok, $"Wallet page returned HTTP {response?.Status} at {page.Url}");
+            await AssertNoUiError(page);
+            await Expect(page.Locator($"tr.transaction-row[data-value='{txHash}']"))
+                .ToBeVisibleAsync(new LocatorAssertionsToBeVisibleOptions { Timeout = 5_000 });
+        }, TimeSpan.FromSeconds(60), "rebuilt payment transaction to reappear in the wallet UI");
+    }
+
+    private async Task AssertInterruptedWalletScanCanResumeAsync(
+        IPage page,
+        string storeId,
+        int expectedHeight,
+        params uint256[] txIds)
+    {
+        var walletRouteId = $"S-{storeId}-BTC";
+        var strategy = GetWalletAccountKey();
+        var txHashes = txIds.Select(txId => txId.ToString()).ToArray();
+
+        var before = await EventuallyAsync(async () =>
+        {
+            var snapshot = await ReadWalletCacheSnapshotAsync(strategy, txHashes[0]);
+            Assert.True(snapshot.TransactionCount >= txHashes.Length);
+            Assert.True(snapshot.UtxoCount >= txHashes.Length);
+            await AssertPaymentCacheEntriesAsync(strategy, txHashes, snapshot.TransactionCount, snapshot.UtxoCount);
+            return snapshot;
+        }, TimeSpan.FromSeconds(60), "Floresta wallet cache to contain all paid invoice transactions before interrupted scan");
+
+        await WipeWalletCacheAsync(page, walletRouteId);
+        await EventuallyAsync(async () =>
+        {
+            var snapshot = await ReadWalletCacheSnapshotAsync(strategy, txHashes[0]);
+            AssertWalletShapePreserved(before, snapshot);
+            Assert.Equal(0, snapshot.UtxoCount);
+            Assert.Equal(0, snapshot.TransactionCount);
+        }, TimeSpan.FromSeconds(60), "Floresta wallet cache wipe before interrupted scan");
+
+        await StartWalletRescanAsync(page, walletRouteId);
+        await _server.RestartAsync();
+        await WaitForBtcpayFlorestaBackendAsync(page, expectedHeight);
+        await StartWalletRescanAsync(page, walletRouteId);
+
+        await EventuallyAsync(async () =>
+        {
+            var snapshot = await ReadWalletCacheSnapshotAsync(strategy, txHashes[0]);
+            AssertWalletShapePreserved(before, snapshot);
+            Assert.Equal(before.TransactionCount, snapshot.TransactionCount);
+            Assert.Equal(before.UtxoCount, snapshot.UtxoCount);
+            await AssertPaymentCacheEntriesAsync(strategy, txHashes, before.TransactionCount, before.UtxoCount);
+        }, TimeSpan.FromSeconds(120), "interrupted Floresta wallet scan to rebuild after BTCPay restart");
+    }
+
+    private static async Task AssertWalletSnapshotPreservedAsync(
+        string strategy,
+        uint256 txId,
+        WalletCacheSnapshot expected)
+    {
+        var actual = await ReadWalletCacheSnapshotAsync(strategy, txId.ToString());
+        AssertWalletShapePreserved(expected, actual);
+        Assert.Equal(expected.TransactionCount, actual.TransactionCount);
+        Assert.Equal(expected.UtxoCount, actual.UtxoCount);
+        Assert.Equal(expected.PaymentTransactionCount, actual.PaymentTransactionCount);
+        Assert.Equal(expected.PaymentUtxoCount, actual.PaymentUtxoCount);
+        Assert.Equal(expected.PaymentUtxoValue, actual.PaymentUtxoValue);
+    }
+
+    private static async Task AssertPaymentCacheEntriesAsync(
+        string strategy,
+        string[] txHashes,
+        int expectedTransactionCount,
+        int expectedUtxoCount)
+    {
+        foreach (var txHash in txHashes)
+        {
+            var snapshot = await ReadWalletCacheSnapshotAsync(strategy, txHash);
+            Assert.Equal(expectedTransactionCount, snapshot.TransactionCount);
+            Assert.Equal(expectedUtxoCount, snapshot.UtxoCount);
+            Assert.Equal(1, snapshot.PaymentTransactionCount);
+            Assert.Equal(1, snapshot.PaymentUtxoCount);
+            Assert.True(snapshot.PaymentUtxoValue > 0);
+        }
+    }
+
+    private static async Task AssertKnownPaymentsRemainActiveAsync(string strategy, params uint256[] txIds)
+    {
+        var txHashes = txIds.Select(txId => txId.ToString()).ToArray();
+        await EventuallyAsync(async () =>
+        {
+            var snapshot = await ReadWalletCacheSnapshotAsync(strategy, txHashes[0]);
+            Assert.True(snapshot.TransactionCount >= txHashes.Length);
+            Assert.True(snapshot.UtxoCount >= txHashes.Length);
+            await AssertPaymentCacheEntriesAsync(strategy, txHashes, snapshot.TransactionCount, snapshot.UtxoCount);
+        }, TimeSpan.FromSeconds(120), "known payment transactions to remain active after Floresta restart");
+    }
+
+    private static void AssertWalletShapePreserved(WalletCacheSnapshot expected, WalletCacheSnapshot actual)
+    {
+        Assert.Equal(expected.AddressCount, actual.AddressCount);
+        Assert.Equal(expected.ReservedAddressCount, actual.ReservedAddressCount);
+        Assert.Equal(expected.UsedAddressCount, actual.UsedAddressCount);
+        Assert.Equal(expected.ReceiveGapIndex, actual.ReceiveGapIndex);
+        Assert.Equal(expected.ChangeGapIndex, actual.ChangeGapIndex);
+        Assert.Equal(expected.DescriptorStatus, actual.DescriptorStatus);
+        Assert.Equal(expected.RescanStatus, actual.RescanStatus);
+        Assert.Equal(expected.HasRescanRequestedAt, actual.HasRescanRequestedAt);
+        Assert.Equal(expected.RescanStartHeight, actual.RescanStartHeight);
+        Assert.Equal(expected.RescanError, actual.RescanError);
+    }
+
+    private async Task WipeWalletCacheAsync(IPage page, string walletRouteId)
+    {
+        await page.GotoAsync(new Uri(_server.ServerUri, $"/wallets/{walletRouteId}/transactions?loadTransactions=true").ToString(),
+            new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
+        await AssertNoUiError(page);
+        await page.EvaluateAsync("""
+            () => {
+                const form = document.getElementById('WalletActions');
+                if (!form) throw new Error('WalletActions form not found');
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'command';
+                input.value = 'clear';
+                form.appendChild(input);
+                form.submit();
+            }
+            """);
+        await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 30_000 });
+        await AssertNoUiError(page);
+    }
+
+    private async Task StartWalletRescanAsync(IPage page, string walletRouteId)
+    {
+        await page.GotoAsync(new Uri(_server.ServerUri, $"/wallets/{walletRouteId}/rescan").ToString(),
+            new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
+        await AssertNoUiError(page);
+        await page.Locator("#StartingIndex").FillAsync("0");
+        await page.Locator("#GapLimit").FillAsync("100");
+        await page.Locator("#BatchSize").FillAsync("100");
+        await page.EvaluateAsync("""
+            () => {
+                const button = Array.from(document.querySelectorAll('button'))
+                    .find(b => b.textContent?.trim() === 'Start scan');
+                const form = button?.closest('form');
+                if (!form) throw new Error('Wallet rescan form not found');
+                form.submit();
+            }
+            """);
+        await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 30_000 });
+        await AssertNoUiError(page);
+    }
+
+    private static async Task<WalletCacheSnapshot> ReadWalletCacheSnapshotAsync(string strategy, string txId)
+    {
+        await using var connection = new NpgsqlConnection(GetE2ePostgresConnectionString());
+        await connection.OpenAsync();
+
+        await using var walletCommand = new NpgsqlCommand("""
+            SELECT
+                "ReceiveGapIndex",
+                "ChangeGapIndex",
+                "DescriptorStatus",
+                "RescanStatus",
+                "RescanRequestedAt" IS NOT NULL,
+                "RescanStartHeight",
+                "RescanError"
+            FROM floresta.tracked_wallets
+            WHERE "Id" = @walletId
+            """, connection);
+        walletCommand.Parameters.AddWithValue("walletId", strategy);
+
+        await using var reader = await walletCommand.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync(), $"Floresta tracked wallet was not found for {strategy}");
+        var receiveGapIndex = reader.GetInt32(0);
+        var changeGapIndex = reader.GetInt32(1);
+        var descriptorStatus = reader.GetString(2);
+        var rescanStatus = reader.GetString(3);
+        var hasRescanRequestedAt = reader.GetBoolean(4);
+        var rescanStartHeight = reader.IsDBNull(5) ? (int?)null : reader.GetInt32(5);
+        var rescanError = reader.IsDBNull(6) ? null : reader.GetString(6);
+        await reader.DisposeAsync();
+
+        return new WalletCacheSnapshot(
+            receiveGapIndex,
+            changeGapIndex,
+            descriptorStatus,
+            rescanStatus,
+            hasRescanRequestedAt,
+            rescanStartHeight,
+            rescanError,
+            await CountAsync(connection, "floresta.tracked_addresses", @"""WalletId"" = @walletId", strategy, txId),
+            await CountAsync(connection, "floresta.tracked_addresses", @"""WalletId"" = @walletId AND ""IsReserved""", strategy, txId),
+            await CountAsync(connection, "floresta.tracked_addresses", @"""WalletId"" = @walletId AND ""IsUsed""", strategy, txId),
+            await CountAsync(connection, "floresta.utxos", @"""WalletId"" = @walletId", strategy, txId),
+            await CountAsync(connection, "floresta.utxos", @"""WalletId"" = @walletId AND ""Txid"" = @txId AND NOT ""IsSpent""", strategy, txId),
+            await SumAsync(connection, "floresta.utxos", @"""Value""", @"""WalletId"" = @walletId AND ""Txid"" = @txId AND NOT ""IsSpent""", strategy, txId),
+            await CountAsync(connection, "floresta.transactions", @"""WalletId"" = @walletId", strategy, txId),
+            await CountAsync(connection, "floresta.transactions", @"""WalletId"" = @walletId AND ""Txid"" = @txId AND ""RemovedAt"" IS NULL", strategy, txId));
+    }
+
+    private static async Task<int> CountAsync(
+        NpgsqlConnection connection,
+        string table,
+        string where,
+        string walletId,
+        string txId)
+    {
+        await using var command = new NpgsqlCommand($@"SELECT COUNT(*) FROM {table} WHERE {where}", connection);
+        command.Parameters.AddWithValue("walletId", walletId);
+        command.Parameters.AddWithValue("txId", txId);
+        return Convert.ToInt32(await command.ExecuteScalarAsync());
+    }
+
+    private static async Task<long> SumAsync(
+        NpgsqlConnection connection,
+        string table,
+        string column,
+        string where,
+        string walletId,
+        string txId)
+    {
+        await using var command = new NpgsqlCommand($@"SELECT COALESCE(SUM({column}), 0) FROM {table} WHERE {where}", connection);
+        command.Parameters.AddWithValue("walletId", walletId);
+        command.Parameters.AddWithValue("txId", txId);
+        return Convert.ToInt64(await command.ExecuteScalarAsync());
+    }
+
+    private static string GetE2ePostgresConnectionString()
+    {
+        return Environment.GetEnvironmentVariable("E2E_POSTGRES") ??
+               "User ID=postgres;Password=postgres;Include Error Detail=true;Host=127.0.0.1;Port=39372;Database=btcpayserver_floresta_e2e";
+    }
+
+    private static string GetTail(string text, int lineCount)
+    {
+        var lines = text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        return string.Join('\n', lines.TakeLast(lineCount));
     }
 
     private async Task<string> CreateStore(IPage page)
@@ -627,9 +1014,15 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
     private static string GetWalletDerivationScheme()
     {
         var rootKey = new Mnemonic(WalletSeedMnemonic).DeriveExtKey();
-        var accountKey = rootKey.Derive(WalletAccountKeyPath).Neuter().GetWif(Network.RegTest);
         var fingerprint = rootKey.GetPublicKey().GetHDFingerPrint();
-        return $"wpkh([{fingerprint}/{WalletAccountKeyPath}]{accountKey}/<0;1>/*)";
+        return $"wpkh([{fingerprint}/{WalletAccountKeyPath}]{GetWalletAccountKey()}/<0;1>/*)";
+    }
+
+    private static string GetWalletAccountKey()
+    {
+        var rootKey = new Mnemonic(WalletSeedMnemonic).DeriveExtKey();
+        var accountKey = rootKey.Derive(WalletAccountKeyPath).Neuter().GetWif(Network.RegTest);
+        return accountKey.ToString();
     }
 
     private async Task<uint256> SpendFromBtcpayWalletWithSeed(IPage page, string storeId, RPCClient bitcoinWallet)
@@ -708,6 +1101,44 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
         throw new TimeoutException($"Timed out waiting for {description}. Last error: {lastError?.Message}", lastError);
     }
+
+    private static async Task<T> EventuallyAsync<T>(Func<Task<T>> action, TimeSpan timeout, string description)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        Exception? lastError = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            try
+            {
+                return await action();
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+                await Task.Delay(1_000);
+            }
+        }
+
+        throw new TimeoutException($"Timed out waiting for {description}. Last error: {lastError?.Message}", lastError);
+    }
+
+    private sealed record WalletCacheSnapshot(
+        int ReceiveGapIndex,
+        int ChangeGapIndex,
+        string DescriptorStatus,
+        string RescanStatus,
+        bool HasRescanRequestedAt,
+        int? RescanStartHeight,
+        string? RescanError,
+        int AddressCount,
+        int ReservedAddressCount,
+        int UsedAddressCount,
+        int UtxoCount,
+        int PaymentUtxoCount,
+        long PaymentUtxoValue,
+        int TransactionCount,
+        int PaymentTransactionCount);
+
     private static async Task AssertNoUiError(IPage page)
     {
         var errorPageMarker = page.Locator("[data-testid='ui-error-page']");

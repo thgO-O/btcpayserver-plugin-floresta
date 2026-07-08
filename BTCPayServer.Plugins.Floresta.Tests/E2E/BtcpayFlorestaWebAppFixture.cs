@@ -19,6 +19,10 @@ public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
     private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "btcpay-floresta-e2e-" + Guid.NewGuid().ToString("N"));
     private Process? _process;
     private readonly StringBuilder _output = new();
+    private string _btcpayProject = null!;
+    private string _pluginDll = null!;
+    private string _postgres = null!;
+    private int _port;
 
     public Uri ServerUri { get; private set; } = null!;
     public string Output => _output.ToString();
@@ -26,28 +30,39 @@ public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
     public async Task InitializeAsync()
     {
         Directory.CreateDirectory(_dataDir);
-        var port = GetFreePort();
-        ServerUri = new Uri($"http://127.0.0.1:{port}/");
+        _port = GetFreePort();
+        ServerUri = new Uri($"http://127.0.0.1:{_port}/");
 
-        var btcpayProject = Path.GetFullPath(
+        _btcpayProject = Path.GetFullPath(
             Environment.GetEnvironmentVariable("BTCPAYSERVER_PROJECT") ??
             Path.Combine(GetRepoRoot(), "submodules", "btcpayserver", "BTCPayServer", "BTCPayServer.csproj"));
-        if (!File.Exists(btcpayProject))
-            throw new InvalidOperationException($"BTCPayServer project not found at {btcpayProject}");
+        if (!File.Exists(_btcpayProject))
+            throw new InvalidOperationException($"BTCPayServer project not found at {_btcpayProject}");
 
-        var pluginDll = typeof(FlorestaPlugin).Assembly.Location;
-        if (!File.Exists(pluginDll))
-            throw new InvalidOperationException($"Floresta plugin assembly not found at {pluginDll}");
+        _pluginDll = typeof(FlorestaPlugin).Assembly.Location;
+        if (!File.Exists(_pluginDll))
+            throw new InvalidOperationException($"Floresta plugin assembly not found at {_pluginDll}");
 
-        var postgres = Environment.GetEnvironmentVariable("E2E_POSTGRES") ??
-                       "User ID=postgres;Password=postgres;Include Error Detail=true;Host=127.0.0.1;Port=39372;Database=btcpayserver_floresta_e2e";
+        _postgres = Environment.GetEnvironmentVariable("E2E_POSTGRES") ??
+                    "User ID=postgres;Password=postgres;Include Error Detail=true;Host=127.0.0.1;Port=39372;Database=btcpayserver_floresta_e2e";
 
+        await StartProcessAsync();
+    }
+
+    public async Task RestartAsync()
+    {
+        await StopProcessAsync();
+        await StartProcessAsync();
+    }
+
+    private async Task StartProcessAsync()
+    {
         var args = new[]
         {
             "run",
             "--no-build",
             "--project",
-            btcpayProject,
+            _btcpayProject,
             "--",
             "--datadir",
             _dataDir,
@@ -56,9 +71,9 @@ public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
             "--chains",
             "BTC",
             "--postgres",
-            postgres,
+            _postgres,
             "--port",
-            port.ToString(),
+            _port.ToString(),
             "--bind",
             "127.0.0.1",
             "--nocsp=true",
@@ -80,8 +95,8 @@ public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
             psi.ArgumentList.Add(arg);
 
         psi.Environment["ASPNETCORE_ENVIRONMENT"] = "Development";
-        psi.Environment["BTCPAY_DEBUG_PLUGINS"] = pluginDll;
-        psi.Environment["DEBUG_PLUGINS"] = pluginDll;
+        psi.Environment["BTCPAY_DEBUG_PLUGINS"] = _pluginDll;
+        psi.Environment["DEBUG_PLUGINS"] = _pluginDll;
         psi.Environment["FLORESTA_REPLACE_BTCPAY_BACKEND"] = Environment.GetEnvironmentVariable("FLORESTA_REPLACE_BTCPAY_BACKEND") ?? "true";
         psi.Environment["FLORESTA_NETWORK"] = Environment.GetEnvironmentVariable("FLORESTA_NETWORK") ?? "regtest";
         psi.Environment["FLORESTA_ELECTRUM_HOST"] = Environment.GetEnvironmentVariable("FLORESTA_ELECTRUM_HOST") ?? "127.0.0.1";
@@ -103,6 +118,20 @@ public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
+        await StopProcessAsync();
+        try
+        {
+            if (Directory.Exists(_dataDir))
+                Directory.Delete(_dataDir, recursive: true);
+        }
+        catch
+        {
+            // The test result should not depend on temp directory cleanup.
+        }
+    }
+
+    private async Task StopProcessAsync()
+    {
         if (_process is { HasExited: false })
         {
             try
@@ -117,15 +146,7 @@ public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
         }
 
         _process?.Dispose();
-        try
-        {
-            if (Directory.Exists(_dataDir))
-                Directory.Delete(_dataDir, recursive: true);
-        }
-        catch
-        {
-            // The test result should not depend on temp directory cleanup.
-        }
+        _process = null;
     }
 
     private async Task WaitForServerAsync(TimeSpan timeout)
