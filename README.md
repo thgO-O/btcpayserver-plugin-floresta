@@ -1,6 +1,6 @@
 # BTCPay Server Floresta Plugin
 
-This plugin lets BTCPay Server use Floresta to follow Bitcoin payments.
+This plugin lets BTCPay Server use [Floresta](https://github.com/getfloresta/floresta) to follow Bitcoin payments.
 
 Floresta is a lighter Bitcoin node. The goal is to let BTCPay see Bitcoin payments without running the usual full Bitcoin Core and NBXplorer setup.
 
