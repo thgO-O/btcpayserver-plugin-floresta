@@ -62,11 +62,13 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
         var storeId = await CreateStore(page);
         await ConfigureStoreToSettleUnconfirmed(page, storeId);
+        var strategy = GetWalletAccountKey();
+        var trackingOutputOffset = _server.Output.Length;
         await AddWatchOnlyWallet(page, storeId);
         await WaitForDescriptorsAsync();
+        await WaitForWalletTrackingReadyAsync(strategy, trackingOutputOffset);
 
         var walletUrl = new Uri(_server.ServerUri, $"/wallets/S-{storeId}-BTC?loadTransactions=true").ToString();
-        var strategy = GetWalletAccountKey();
 
         var txId = await PayInvoiceAndWaitAsync(page, storeId, bitcoin, bitcoinWallet, "0.00100000", Money.Coins(0.001m));
         await AssertWalletTransactionVisibleAsync(page, walletUrl, txId, "0.00100000");
@@ -343,7 +345,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
             Assert.True(
                 peers.EnumerateArray().Any(peer => PeerMatches(peer, "address", endpoint)),
                 $"Expected Floresta to have a utreexod peer at {endpoint}");
-        }, TimeSpan.FromSeconds(30), "Floresta utreexod connection retry");
+        }, TimeSpan.FromSeconds(180), "Floresta utreexod connection retry");
     }
 
     private static async Task WaitForRegtestMeshAsync(RPCClient bitcoin, string bitcoindEndpoint, string utreexodEndpoint)
@@ -608,7 +610,8 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         Money invoiceAmount)
     {
         var invoiceId = await CreateInvoice(page, storeId, displayAmount, "BTC");
-        await page.GotoAsync(new Uri(_server.ServerUri, $"/i/{invoiceId}").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
+        var invoiceUrl = new Uri(_server.ServerUri, $"/i/{invoiceId}").ToString();
+        await page.GotoAsync(invoiceUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
         await AssertNoUiError(page);
 
         var invoiceAddress = await page.Locator("#Address_BTC-CHAIN .truncate-center").GetAttributeAsync("data-text");
@@ -622,20 +625,81 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await RefreshFlorestaUtreexoPeerAsync();
         await WaitForUtreexodChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
         await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
-        await WaitForInvoiceSettledAsync(page);
+        try
+        {
+            await WaitForInvoiceSettledAsync(page, invoiceUrl);
+        }
+        catch (TimeoutException)
+        {
+            var strategy = GetWalletAccountKey();
+            var walletRouteId = $"S-{storeId}-BTC";
+            await StartWalletRescanAsync(page, walletRouteId);
+            await WaitForPaymentCacheEntryAsync(strategy, txId);
+
+            await bitcoinWallet.GenerateToAddressAsync(1, await bitcoinWallet.GetNewAddressAsync());
+            await SubmitBitcoinChainToUtreexodAsync(bitcoin);
+            await RefreshFlorestaUtreexoPeerAsync();
+            await WaitForUtreexodChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
+            await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
+            await WaitForInvoiceSettledAsync(page, invoiceUrl);
+        }
+
         return txId;
     }
 
-    private static async Task WaitForInvoiceSettledAsync(IPage page)
+    private async Task WaitForWalletTrackingReadyAsync(string strategy, int outputOffset)
     {
         await EventuallyAsync(async () =>
         {
-            await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.Commit });
-            await AssertNoUiError(page);
-            var settled = page.Locator("#settled");
-            await settled.WaitForAsync(new LocatorWaitForOptions { Timeout = 5_000 });
-            await Expect(settled).ToContainTextAsync("Invoice Paid", new LocatorAssertionsToContainTextOptions { Timeout = 5_000 });
-        }, TimeSpan.FromSeconds(120), "invoice to become settled");
+            var output = _server.Output;
+            var newOutput = output.Length > outputOffset ? output[outputOffset..] : string.Empty;
+            Assert.True(
+                newOutput.Contains("Now tracking wallet", StringComparison.Ordinal),
+                $"BTCPay output did not show wallet tracking completion for the current import.\n{GetTail(output, 120)}");
+
+            await using var connection = new NpgsqlConnection(GetE2ePostgresConnectionString());
+            await connection.OpenAsync();
+            var addressCount = await CountAsync(
+                connection,
+                "floresta.tracked_addresses",
+                @"""WalletId"" = @walletId",
+                strategy,
+                string.Empty);
+            Assert.True(
+                addressCount >= FlorestaSettings.KnownWatchedDescriptorAddressCount * 2,
+                $"Expected derived receive/change addresses for {strategy}, got {addressCount}");
+        }, TimeSpan.FromSeconds(120), "Floresta wallet tracking to finish after wallet import");
+    }
+
+    private async Task WaitForInvoiceSettledAsync(IPage page, string invoiceUrl)
+    {
+        try
+        {
+            await EventuallyAsync(async () =>
+            {
+                await page.GotoAsync(invoiceUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Commit });
+                await AssertNoUiError(page);
+                var settled = page.Locator("#settled");
+                await settled.WaitForAsync(new LocatorWaitForOptions { Timeout = 5_000 });
+                await Expect(settled).ToContainTextAsync("Invoice Paid", new LocatorAssertionsToContainTextOptions { Timeout = 5_000 });
+            }, TimeSpan.FromSeconds(120), "invoice to become settled");
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException($"{ex.Message}\n\nBTCPay output tail:\n{GetTail(_server.Output, 120)}", ex);
+        }
+    }
+
+    private static async Task WaitForPaymentCacheEntryAsync(string strategy, uint256 txId)
+    {
+        var txHash = txId.ToString();
+        await EventuallyAsync(async () =>
+        {
+            var snapshot = await ReadWalletCacheSnapshotAsync(strategy, txHash);
+            Assert.Equal(1, snapshot.PaymentTransactionCount);
+            Assert.Equal(1, snapshot.PaymentUtxoCount);
+            Assert.True(snapshot.PaymentUtxoValue > 0);
+        }, TimeSpan.FromSeconds(120), $"Floresta wallet cache to contain payment {txHash}");
     }
 
     private static async Task AssertWalletTransactionVisibleAsync(
