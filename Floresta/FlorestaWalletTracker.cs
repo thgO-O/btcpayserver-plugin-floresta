@@ -125,8 +125,12 @@ public class FlorestaWalletTracker
         {
             try
             {
-                await _walletSync.SubscribeTrackedAddressesAsync(addresses, ct);
-                await _walletSync.SyncWalletStateAsync(walletId, addresses, ct);
+                var currentAddresses = addresses;
+                if (_trackedStrategies.ContainsKey(walletId))
+                    currentAddresses = await PrepareWalletTrackingAsync(walletId, ct);
+
+                await _walletSync.SubscribeTrackedAddressesAsync(currentAddresses, ct);
+                await _walletSync.SyncWalletStateAsync(walletId, currentAddresses, ct);
             }
             catch (Exception ex)
             {
