@@ -48,6 +48,15 @@ public class FlorestaHttpHandler(
             };
         }
 
+        if (cryptoCode != null &&
+            ShouldBlockForInvalidNetwork(method, path, statusMonitor.IsNetworkCompatible))
+        {
+            return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            {
+                Content = new StringContent("Floresta Bitcoin backend network has not been validated.")
+            };
+        }
+
         logger.LogDebug("Intercepting {Method} {Path}", method, SanitizePathForLog(path));
 
         try
@@ -328,6 +337,12 @@ public class FlorestaHttpHandler(
     {
         path = Regex.Replace(path, @"(/v1/cryptos/\w+/addresses/)[^/]+$", "$1{address}");
         return Regex.Replace(path, @"/derivations/[^/]+", "/derivations/{wallet}");
+    }
+
+    internal static bool ShouldBlockForInvalidNetwork(HttpMethod method, string path, bool networkCompatible)
+    {
+        return !networkCompatible &&
+               !(method == HttpMethod.Get && path.EndsWith("/status", StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task<object> HandleCreatePsbtAsync(string strategyStr, string body, CancellationToken ct)
