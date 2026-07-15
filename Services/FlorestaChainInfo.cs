@@ -17,6 +17,7 @@ public sealed record FlorestaHealthSnapshot(
     string ElectrumStatus,
     string ElectrumVersion,
     bool? RpcReachable,
+    string RpcNetwork,
     int? Height,
     string BestBlockHash,
     bool? IsInitialBlockDownload,

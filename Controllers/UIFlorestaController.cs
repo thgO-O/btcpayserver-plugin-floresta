@@ -84,6 +84,7 @@ public class UIFlorestaController : Controller
                     "Reachable",
                     sw,
                     true,
+                    chainInfo.Chain,
                     chainInfo.Height,
                     chainInfo.BestBlockHash,
                     chainInfo.IsInitialBlockDownload,

@@ -390,6 +390,7 @@ public class FlorestaStatusMonitor : IHostedService
             (IsNetworkCompatible ? State : NBXplorerState.NotConnected).ToString(),
             ServerVersion ?? "unknown",
             RpcReachable,
+            ChainInfo.Chain,
             ChainInfo.Height ?? (TipHeight > 0 ? TipHeight : null),
             ChainInfo.BestBlockHash ?? BestBlockHash,
             ChainInfo.IsInitialBlockDownload ?? IsInitialBlockDownload,

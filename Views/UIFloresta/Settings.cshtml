@@ -58,15 +58,17 @@
                         <dd class="col-sm-8" id="FlorestaHealthElectrumStatus">@health.ElectrumStatus</dd>
                         <dt class="col-sm-4">Electrum version</dt>
                         <dd class="col-sm-8" id="FlorestaHealthElectrumVersion">@health.ElectrumVersion</dd>
-                        <dt class="col-sm-4">RPC</dt>
+                        <dt class="col-sm-4">RPC status</dt>
                         <dd class="col-sm-8" id="FlorestaHealthRpcStatus">@rpcStatus</dd>
-                        <dt class="col-sm-4">Height</dt>
+                        <dt class="col-sm-4">RPC network</dt>
+                        <dd class="col-sm-8" id="FlorestaHealthRpcNetwork">@(health.RpcNetwork ?? "Unknown")</dd>
+                        <dt class="col-sm-4">RPC height</dt>
                         <dd class="col-sm-8" id="FlorestaHealthHeight">@(health.Height?.ToString() ?? "Unknown")</dd>
-                        <dt class="col-sm-4">Best block</dt>
+                        <dt class="col-sm-4">RPC best block</dt>
                         <dd class="col-sm-8 text-break" id="FlorestaHealthBestBlock">@health.ShortBestBlockHash</dd>
-                        <dt class="col-sm-4">IBD</dt>
+                        <dt class="col-sm-4">RPC IBD</dt>
                         <dd class="col-sm-8" id="FlorestaHealthIbd">@ibdStatus</dd>
-                        <dt class="col-sm-4">Validated height</dt>
+                        <dt class="col-sm-4">RPC validated height</dt>
                         <dd class="col-sm-8" id="FlorestaHealthValidated">@(health.ValidatedHeight?.ToString() ?? "Unknown")</dd>
                         <dt class="col-sm-4">Updated</dt>
                         <dd class="col-sm-8" id="FlorestaHealthUpdated">@(health.LastUpdated?.ToString("u") ?? "Never")</dd>

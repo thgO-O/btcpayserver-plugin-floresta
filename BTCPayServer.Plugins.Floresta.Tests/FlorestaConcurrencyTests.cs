@@ -100,6 +100,10 @@ public class FlorestaConcurrencyTests
         Assert.Null(monitor.ValidatedHeight);
         Assert.Equal("bitcoin", monitor.ChainInfo.Chain);
         Assert.False(monitor.IsNetworkCompatible);
+
+        var health = monitor.GetHealthSnapshot();
+        Assert.Equal("bitcoin", health.RpcNetwork);
+        Assert.Equal(999, health.Height);
     }
 
     [Fact]
