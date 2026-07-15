@@ -239,12 +239,15 @@ public class FlorestaListener : IHostedService
                 return;
 
             _logger.LogInformation("Electrum reconnected, re-initializing tracker");
-            _listenerInitialized = false;
             var initializedHeight = await InitializeListenerAsync(ct);
-            if (initializedHeight is null || !_statusMonitor.IsNetworkCompatible)
+            var catchUpHeight = GetReconnectCatchUpHeight(
+                initializedHeight,
+                _statusMonitor.TipHeight,
+                _statusMonitor.IsNetworkCompatible);
+            if (catchUpHeight is null)
                 return;
 
-            var newTxs = await _tracker.HandleNewBlockAsync(initializedHeight.Value, ct);
+            var newTxs = await _tracker.HandleNewBlockAsync(catchUpHeight.Value, ct);
             await ProcessNewTransactions(newTxs, ct);
             await RequestPaymentPollingAsync(ct);
             await PublishChainUpdate(ct);
@@ -253,6 +256,14 @@ public class FlorestaListener : IHostedService
         {
             _logger.LogError(ex, "Error during reconnection re-initialization");
         }
+    }
+
+    internal static int? GetReconnectCatchUpHeight(
+        int? initializedHeight,
+        int currentTipHeight,
+        bool isNetworkCompatible)
+    {
+        return isNetworkCompatible ? initializedHeight ?? currentTipHeight : null;
     }
 
     private async Task ProcessNewTransactions(

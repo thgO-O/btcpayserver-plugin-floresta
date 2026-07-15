@@ -106,6 +106,24 @@ public class FlorestaListenerTests
         Assert.DoesNotContain(":", outpoint.ToString(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(120, 110, true, 120)]
+    [InlineData(null, 110, true, 110)]
+    [InlineData(120, 110, false, null)]
+    public void ReconnectCatchUpUsesInitializedHeightOrCurrentTip(
+        int? initializedHeight,
+        int currentTipHeight,
+        bool isNetworkCompatible,
+        int? expectedHeight)
+    {
+        var height = FlorestaListener.GetReconnectCatchUpHeight(
+            initializedHeight,
+            currentTipHeight,
+            isNetworkCompatible);
+
+        Assert.Equal(expectedHeight, height);
+    }
+
     [Fact]
     public void FlorestaCapabilitiesDoNotAdvertiseTransactionCheck()
     {
