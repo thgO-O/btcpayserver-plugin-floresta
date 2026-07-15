@@ -1,12 +1,15 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Logging;
 using BTCPayServer.Plugins.Floresta.Data;
 using BTCPayServer.Plugins.Floresta.Services;
 using Microsoft.Extensions.Logging.Abstractions;
 using NBitcoin;
+using NBXplorer;
 using NBXplorer.DerivationStrategy;
 using Xunit;
 
@@ -72,6 +75,92 @@ public class FlorestaConcurrencyTests
         monitor.SetTipHeight(10);
 
         Assert.Equal(10, monitor.TipHeight);
+    }
+
+    [Fact]
+    public void StatusMonitorDoesNotApplyChainStateFromMismatchedNetwork()
+    {
+        var monitor = CreateStatusMonitor(ChainName.Regtest);
+        monitor.SetTipHeight(12);
+
+        var applied = monitor.TryApplyBackendInfo(
+            new FlorestaChainInfo(
+                Height: 999,
+                IsInitialBlockDownload: false,
+                ValidatedHeight: 998,
+                Chain: "bitcoin"),
+            CreateServerFeatures(monitor.ExpectedNetwork),
+            connectionGeneration: 0,
+            out var error);
+
+        Assert.False(applied);
+        Assert.Contains("expects Regtest", error);
+        Assert.Equal(12, monitor.TipHeight);
+        Assert.Null(monitor.IsInitialBlockDownload);
+        Assert.Null(monitor.ValidatedHeight);
+        Assert.Equal("bitcoin", monitor.ChainInfo.Chain);
+        Assert.False(monitor.IsNetworkCompatible);
+    }
+
+    [Fact]
+    public void StatusMonitorAppliesChainStateFromMatchingNetwork()
+    {
+        var monitor = CreateStatusMonitor(ChainName.Regtest);
+
+        var applied = monitor.TryApplyBackendInfo(
+            new FlorestaChainInfo(
+                Height: 12,
+                IsInitialBlockDownload: false,
+                ValidatedHeight: 11,
+                Chain: "regtest"),
+            CreateServerFeatures(monitor.ExpectedNetwork),
+            connectionGeneration: 0,
+            out var error);
+
+        Assert.True(applied);
+        Assert.Null(error);
+        Assert.Equal(12, monitor.TipHeight);
+        Assert.False(monitor.IsInitialBlockDownload);
+        Assert.Equal(11, monitor.ValidatedHeight);
+    }
+
+    [Fact]
+    public void StatusMonitorDoesNotApplyChainStateFromMismatchedElectrumNetwork()
+    {
+        var monitor = CreateStatusMonitor(ChainName.Regtest);
+        monitor.SetTipHeight(12);
+
+        var applied = monitor.TryApplyBackendInfo(
+            new FlorestaChainInfo(
+                Height: 999,
+                IsInitialBlockDownload: false,
+                ValidatedHeight: 998,
+                Chain: "regtest"),
+            CreateServerFeatures(Network.Main),
+            connectionGeneration: 0,
+            out var error);
+
+        Assert.False(applied);
+        Assert.Contains("Electrum network mismatch", error);
+        Assert.Equal(12, monitor.TipHeight);
+        Assert.Null(monitor.IsInitialBlockDownload);
+        Assert.Null(monitor.ValidatedHeight);
+        Assert.False(monitor.IsNetworkCompatible);
+    }
+
+    [Fact]
+    public void StatusMonitorFailsClosedWhenBtcNetworkIsMissing()
+    {
+        var nbxplorerNetworkProvider = new NBXplorerNetworkProvider(ChainName.Regtest);
+        var networkProvider = new BTCPayNetworkProvider(
+            Array.Empty<BTCPayNetworkBase>(),
+            nbxplorerNetworkProvider,
+            new Logs());
+        var monitor = CreateStatusMonitor(networkProvider);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => _ = monitor.ExpectedChainName);
+
+        Assert.Contains("does not have a BTC network configured", exception.Message);
     }
 
     [Fact]
@@ -155,7 +244,12 @@ public class FlorestaConcurrencyTests
         Assert.NotNull(alreadyRemoved.RemovedAt);
     }
 
-    private static FlorestaStatusMonitor CreateStatusMonitor()
+    private static FlorestaStatusMonitor CreateStatusMonitor(ChainName? chainName = null)
+    {
+        return CreateStatusMonitor(chainName is null ? null! : CreateNetworkProvider(chainName));
+    }
+
+    private static FlorestaStatusMonitor CreateStatusMonitor(BTCPayNetworkProvider networkProvider)
     {
         return new FlorestaStatusMonitor(
             null!,
@@ -163,8 +257,34 @@ public class FlorestaConcurrencyTests
             null!,
             null!,
             null!,
-            null!,
+            networkProvider,
             null!,
             NullLogger<FlorestaStatusMonitor>.Instance);
+    }
+
+    private static BTCPayNetworkProvider CreateNetworkProvider(ChainName chainName)
+    {
+        var nbxplorerNetworkProvider = new NBXplorerNetworkProvider(chainName);
+        var nbxplorerNetwork = nbxplorerNetworkProvider.GetFromCryptoCode("BTC");
+        var bitcoinNetwork = new BTCPayNetwork
+        {
+            CryptoCode = nbxplorerNetwork.CryptoCode,
+            DisplayName = "Bitcoin",
+            NBXplorerNetwork = nbxplorerNetwork,
+            CoinType = chainName == ChainName.Mainnet ? new KeyPath("0'") : new KeyPath("1'")
+        }.SetDefaultElectrumMapping(chainName);
+
+        return new BTCPayNetworkProvider(
+            new BTCPayNetworkBase[] { bitcoinNetwork },
+            nbxplorerNetworkProvider,
+            new Logs());
+    }
+
+    private static JsonElement CreateServerFeatures(Network network)
+    {
+        return JsonSerializer.SerializeToElement(new
+        {
+            genesis_hash = network.GetGenesis().GetHash().ToString()
+        });
     }
 }
