@@ -42,6 +42,7 @@ public class FlorestaListener : IHostedService
     private CancellationTokenSource _cts;
     private Task _listenTask;
     private volatile bool _listenerInitialized;
+    private long _initializedConnectionGeneration = -1;
     private bool _paymentPollingRunning;
     private bool _paymentPollingPending;
 
@@ -145,8 +146,16 @@ public class FlorestaListener : IHostedService
         await _initializationLock.WaitAsync(ct);
         try
         {
-            if (_listenerInitialized)
+            if (_listenerInitialized &&
+                _initializedConnectionGeneration == _electrumClient.ConnectionGeneration)
                 return null;
+
+            await _statusMonitor.RefreshAsync(ct);
+            if (!_statusMonitor.IsNetworkCompatible)
+            {
+                _listenerInitialized = false;
+                return null;
+            }
 
             await _tracker.InitializeAsync(ct);
 
@@ -154,8 +163,14 @@ public class FlorestaListener : IHostedService
             _statusMonitor.SetTipHeight(header.Height);
             _tracker.SetTipHeight(header.Height);
             await _statusMonitor.RefreshAsync(ct);
+            if (!_statusMonitor.IsNetworkCompatible)
+            {
+                _listenerInitialized = false;
+                return null;
+            }
 
             _listenerInitialized = true;
+            _initializedConnectionGeneration = _electrumClient.ConnectionGeneration;
             _logger.LogInformation("Electrum listener initialized, tip height: {Height}", header.Height);
             return header.Height;
         }
@@ -172,7 +187,7 @@ public class FlorestaListener : IHostedService
             try
             {
                 var ct = _cts?.Token ?? CancellationToken.None;
-                if (!await IsBitcoinBackendActiveAsync(ct))
+                if (!await IsBitcoinBackendActiveAsync(ct) || !_statusMonitor.IsNetworkCompatible)
                     return;
 
                 var newTxs = await _tracker.HandleScripthashNotificationAsync(scripthash, status, ct);
@@ -199,6 +214,8 @@ public class FlorestaListener : IHostedService
 
                 _statusMonitor.UpdateTipHeight(header.Height);
                 await _statusMonitor.RefreshAsync(ct);
+                if (!_statusMonitor.IsNetworkCompatible)
+                    return;
 
                 var newTxs = await _tracker.HandleNewBlockAsync(header.Height, ct);
 
@@ -222,9 +239,15 @@ public class FlorestaListener : IHostedService
                 return;
 
             _logger.LogInformation("Electrum reconnected, re-initializing tracker");
-            _listenerInitialized = false;
             var initializedHeight = await InitializeListenerAsync(ct);
-            var newTxs = await _tracker.HandleNewBlockAsync(initializedHeight ?? _statusMonitor.TipHeight, ct);
+            var catchUpHeight = GetReconnectCatchUpHeight(
+                initializedHeight,
+                _statusMonitor.TipHeight,
+                _statusMonitor.IsNetworkCompatible);
+            if (catchUpHeight is null)
+                return;
+
+            var newTxs = await _tracker.HandleNewBlockAsync(catchUpHeight.Value, ct);
             await ProcessNewTransactions(newTxs, ct);
             await RequestPaymentPollingAsync(ct);
             await PublishChainUpdate(ct);
@@ -233,6 +256,14 @@ public class FlorestaListener : IHostedService
         {
             _logger.LogError(ex, "Error during reconnection re-initialization");
         }
+    }
+
+    internal static int? GetReconnectCatchUpHeight(
+        int? initializedHeight,
+        int currentTipHeight,
+        bool isNetworkCompatible)
+    {
+        return isNetworkCompatible ? initializedHeight ?? currentTipHeight : null;
     }
 
     private async Task ProcessNewTransactions(

@@ -90,6 +90,23 @@ public class FlorestaReservationRequestTests
     }
 
     [Fact]
+    public void InvalidNetworkBlocksWalletRoutesButKeepsStatusAvailable()
+    {
+        Assert.True(FlorestaHttpHandler.ShouldBlockForInvalidNetwork(
+            HttpMethod.Get,
+            "/v1/cryptos/BTC/derivations/wallet/utxos",
+            networkCompatible: false));
+        Assert.False(FlorestaHttpHandler.ShouldBlockForInvalidNetwork(
+            HttpMethod.Get,
+            "/v1/cryptos/BTC/status",
+            networkCompatible: false));
+        Assert.False(FlorestaHttpHandler.ShouldBlockForInvalidNetwork(
+            HttpMethod.Post,
+            "/v1/cryptos/BTC/transactions",
+            networkCompatible: true));
+    }
+
+    [Fact]
     public async Task BroadcastTestMempoolAcceptUsesQueryParameter()
     {
         var handler = new RecordingRequestHandler();

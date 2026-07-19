@@ -1,4 +1,5 @@
 using System;
+using BTCPayServer.Plugins.Floresta.Controllers;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Floresta.Tests;
@@ -98,6 +99,46 @@ public class FlorestaSettingsTests
                 CryptoCode = "BTC"
             }.IsBitcoinBackendActive());
         });
+    }
+
+    [Fact]
+    public void ElectrumEndpointComparisonIgnoresHostCase()
+    {
+        var existing = new FlorestaSettings
+        {
+            ElectrumHost = "FLORESTA",
+            ElectrumPort = 50001,
+            ElectrumUseTls = true
+        };
+        var updated = new FlorestaSettings
+        {
+            ElectrumHost = "floresta",
+            ElectrumPort = 50001,
+            ElectrumUseTls = true
+        };
+
+        Assert.False(UIFlorestaController.HasElectrumEndpointChanged(existing, updated));
+    }
+
+    [Fact]
+    public void ElectrumEndpointComparisonDetectsConnectionChanges()
+    {
+        var existing = new FlorestaSettings
+        {
+            ElectrumHost = "floresta",
+            ElectrumPort = 50001,
+            ElectrumUseTls = false
+        };
+
+        Assert.True(UIFlorestaController.HasElectrumEndpointChanged(
+            existing,
+            new FlorestaSettings { ElectrumHost = "other", ElectrumPort = 50001 }));
+        Assert.True(UIFlorestaController.HasElectrumEndpointChanged(
+            existing,
+            new FlorestaSettings { ElectrumHost = "floresta", ElectrumPort = 50002 }));
+        Assert.True(UIFlorestaController.HasElectrumEndpointChanged(
+            existing,
+            new FlorestaSettings { ElectrumHost = "floresta", ElectrumPort = 50001, ElectrumUseTls = true }));
     }
 
     private static void WithEnvironment(string variable, string value, Action action)

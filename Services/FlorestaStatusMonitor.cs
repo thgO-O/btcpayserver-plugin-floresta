@@ -28,6 +28,8 @@ public class FlorestaStatusMonitor : IHostedService
     private readonly ILogger<FlorestaStatusMonitor> _logger;
     private readonly SemaphoreSlim _stepLock = new(1, 1);
     private int _tipHeight;
+    private int _networkCompatible;
+    private long _validatedConnectionGeneration = -1;
     private CancellationTokenSource _cts;
     private Task _monitorLoop;
 
@@ -39,6 +41,11 @@ public class FlorestaStatusMonitor : IHostedService
     public int? ValidatedHeight { get; private set; }
     public int? UtreexoRootCount { get; private set; }
     public bool? RpcReachable { get; private set; }
+    public bool IsNetworkCompatible =>
+        Volatile.Read(ref _networkCompatible) == 1 &&
+        _client.IsConnected &&
+        Volatile.Read(ref _validatedConnectionGeneration) == CurrentConnectionGeneration;
+    private bool IsReady => State == NBXplorerState.Ready && IsNetworkCompatible;
     public DateTimeOffset? LastUpdated { get; private set; }
     public string LastError { get; private set; }
     public FlorestaChainInfo ChainInfo { get; private set; } = new();
@@ -97,7 +104,7 @@ public class FlorestaStatusMonitor : IHostedService
                 _logger.LogError(ex, "Error in Floresta status monitor");
             }
 
-            var delay = State == NBXplorerState.Ready ? TimeSpan.FromMinutes(1) : TimeSpan.FromSeconds(10);
+            var delay = IsReady ? TimeSpan.FromMinutes(1) : TimeSpan.FromSeconds(10);
             try { await Task.Delay(delay, ct); } catch (OperationCanceledException) { break; }
         }
     }
@@ -115,11 +122,30 @@ public class FlorestaStatusMonitor : IHostedService
         }
     }
 
+    public async Task ReloadAsync(CancellationToken ct)
+    {
+        await _stepLock.WaitAsync(ct);
+        try
+        {
+            SetNetworkCompatible(false);
+            if (_client.IsConnected)
+                await _client.DisconnectAsync();
+            ServerVersion = null;
+            await StepAsync(ct);
+        }
+        finally
+        {
+            _stepLock.Release();
+        }
+    }
+
     private async Task StepAsync(CancellationToken ct)
     {
         var oldState = State;
+        var rpcReached = false;
         if (!await IsBitcoinBackendActiveAsync())
         {
+            SetNetworkCompatible(false);
             if (_client.IsConnected)
                 await _client.DisconnectAsync();
 
@@ -141,6 +167,7 @@ public class FlorestaStatusMonitor : IHostedService
             }
             catch (Exception ex)
             {
+                SetNetworkCompatible(false);
                 _logger.LogDebug(ex, "Cannot connect to Floresta backend");
                 RpcReachable = false;
                 LastError = ex.Message;
@@ -160,12 +187,21 @@ public class FlorestaStatusMonitor : IHostedService
             }
 
             var blockchainInfo = await _rpcClient.GetBlockchainInfoAsync(ct);
-            UpdateChainInfo(blockchainInfo);
+            rpcReached = true;
             RpcReachable = true;
+            var chainInfo = FlorestaChainInfoParser.Parse(blockchainInfo);
+            var connectionGeneration = CurrentConnectionGeneration;
+            var serverFeatures = await _client.ServerFeaturesAsync(ct);
+            if (!TryApplyBackendInfo(chainInfo, serverFeatures, connectionGeneration, out var networkError))
+            {
+                LastError = networkError;
+                LastUpdated = DateTimeOffset.UtcNow;
+                SetState(NBXplorerState.NotConnected, oldState, null, null);
+                return;
+            }
+
             LastError = null;
             LastUpdated = DateTimeOffset.UtcNow;
-
-            _ = await _client.ServerFeaturesAsync(ct);
 
             State = IsInitialBlockDownload == true ? NBXplorerState.Synching : NBXplorerState.Ready;
 
@@ -174,8 +210,10 @@ public class FlorestaStatusMonitor : IHostedService
         }
         catch (Exception ex)
         {
+            SetNetworkCompatible(false);
             _logger.LogWarning(ex, "Floresta health check failed");
-            RpcReachable = false;
+            if (!rpcReached)
+                RpcReachable = false;
             LastError = ex.Message;
             LastUpdated = DateTimeOffset.UtcNow;
             State = NBXplorerState.NotConnected;
@@ -191,20 +229,21 @@ public class FlorestaStatusMonitor : IHostedService
     private StatusResult BuildStatusResult()
     {
         var syncHeight = ValidatedHeight ?? TipHeight;
+        var ready = IsReady;
         return new StatusResult
         {
-            IsFullySynched = State == NBXplorerState.Ready,
+            IsFullySynched = ready,
             ChainHeight = TipHeight,
             SyncHeight = syncHeight,
             Version = ServerVersion ?? "floresta-plugin",
             SupportedCryptoCodes = new[] { "BTC" },
-            NetworkType = GetChainName(),
+            NetworkType = ExpectedChainName,
             BitcoinStatus = new BitcoinStatus
             {
                 Blocks = syncHeight,
                 Headers = TipHeight,
                 VerificationProgress = 1.0,
-                IsSynched = State == NBXplorerState.Ready,
+                IsSynched = ready,
                 MinRelayTxFee = new NBitcoin.FeeRate(1.0m),
                 IncrementalRelayFee = new NBitcoin.FeeRate(1.0m),
                 Capabilities = CreateNodeCapabilities()
@@ -284,30 +323,74 @@ public class FlorestaStatusMonitor : IHostedService
         }
     }
 
-    private void UpdateChainInfo(JsonElement blockchainInfo)
+    internal bool TryApplyBackendInfo(
+        FlorestaChainInfo chainInfo,
+        JsonElement serverFeatures,
+        long connectionGeneration,
+        out string networkError)
     {
-        var parsed = FlorestaChainInfoParser.Parse(blockchainInfo);
-        ChainInfo = parsed;
-        if (parsed.Height is int height)
+        ChainInfo = chainInfo;
+        if (_client is not null &&
+            (!_client.IsConnected || CurrentConnectionGeneration != connectionGeneration))
+        {
+            networkError = "Floresta Electrum connection changed during network validation.";
+            SetNetworkCompatible(false);
+            return false;
+        }
+
+        networkError = FlorestaChainInfoParser.GetNetworkValidationError(chainInfo, ExpectedChainName) ??
+                       FlorestaChainInfoParser.GetElectrumNetworkValidationError(serverFeatures, ExpectedNetwork);
+        if (networkError is not null)
+        {
+            SetNetworkCompatible(false);
+            return false;
+        }
+
+        if (chainInfo.Height is int height)
             SetTipHeight(height);
-        BestBlockHash = parsed.BestBlockHash ?? BestBlockHash;
-        IsInitialBlockDownload = parsed.IsInitialBlockDownload ?? IsInitialBlockDownload;
-        ValidatedHeight = parsed.ValidatedHeight ?? ValidatedHeight;
-        UtreexoRootCount = parsed.UtreexoRootCount ?? UtreexoRootCount;
+        BestBlockHash = chainInfo.BestBlockHash ?? BestBlockHash;
+        IsInitialBlockDownload = chainInfo.IsInitialBlockDownload ?? IsInitialBlockDownload;
+        ValidatedHeight = chainInfo.ValidatedHeight ?? ValidatedHeight;
+        UtreexoRootCount = chainInfo.UtreexoRootCount ?? UtreexoRootCount;
+        SetNetworkCompatible(true, connectionGeneration);
+        return true;
     }
 
-    private NBitcoin.ChainName GetChainName()
+    private void SetNetworkCompatible(bool compatible, long connectionGeneration = -1)
     {
-        var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
-        return network?.NBitcoinNetwork?.ChainName ?? NBitcoin.ChainName.Mainnet;
+        if (compatible)
+        {
+            Volatile.Write(ref _validatedConnectionGeneration, connectionGeneration);
+            Volatile.Write(ref _networkCompatible, 1);
+        }
+        else
+        {
+            Volatile.Write(ref _networkCompatible, 0);
+            Volatile.Write(ref _validatedConnectionGeneration, -1);
+        }
     }
+
+    private long CurrentConnectionGeneration => _client?.ConnectionGeneration ?? 0;
+
+    internal NBitcoin.Network ExpectedNetwork
+    {
+        get
+        {
+            var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
+            return network?.NBitcoinNetwork ??
+                   throw new InvalidOperationException("BTCPay Server does not have a BTC network configured.");
+        }
+    }
+
+    internal NBitcoin.ChainName ExpectedChainName => ExpectedNetwork.ChainName;
 
     public FlorestaHealthSnapshot GetHealthSnapshot()
     {
         return new FlorestaHealthSnapshot(
-            State.ToString(),
+            (IsNetworkCompatible ? State : NBXplorerState.NotConnected).ToString(),
             ServerVersion ?? "unknown",
             RpcReachable,
+            ChainInfo.Chain,
             ChainInfo.Height ?? (TipHeight > 0 ? TipHeight : null),
             ChainInfo.BestBlockHash ?? BestBlockHash,
             ChainInfo.IsInitialBlockDownload ?? IsInitialBlockDownload,

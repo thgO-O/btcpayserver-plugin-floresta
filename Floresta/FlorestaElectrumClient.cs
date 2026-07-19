@@ -51,6 +51,8 @@ public class FlorestaElectrumClient : IAsyncDisposable
     private StreamReader _reader;
     private StreamWriter _writer;
     private int _nextId;
+    private int _isConnected;
+    private long _connectionGeneration;
     private Task _readLoop;
     private CancellationTokenSource _cts;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -59,7 +61,12 @@ public class FlorestaElectrumClient : IAsyncDisposable
     private bool _headersSubscribed;
     private bool _intentionalDisconnect;
 
-    public bool IsConnected { get; private set; }
+    public bool IsConnected
+    {
+        get => Volatile.Read(ref _isConnected) == 1;
+        private set => Volatile.Write(ref _isConnected, value ? 1 : 0);
+    }
+    public long ConnectionGeneration => Interlocked.Read(ref _connectionGeneration);
 
     public event Action<FlorestaElectrumHeaderNotification> OnNewBlock;
     public event Action<string, string> OnScripthashNotification;
@@ -114,6 +121,7 @@ public class FlorestaElectrumClient : IAsyncDisposable
         _writer = new StreamWriter(stream) { AutoFlush = true, NewLine = "\n" };
 
         _cts = new CancellationTokenSource();
+        Interlocked.Increment(ref _connectionGeneration);
         IsConnected = true;
         var readLoopCts = _cts;
         _readLoop = Task.Run(() => ReadLoopAsync(readLoopCts.Token));

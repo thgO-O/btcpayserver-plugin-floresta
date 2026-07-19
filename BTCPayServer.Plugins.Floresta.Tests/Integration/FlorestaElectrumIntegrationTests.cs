@@ -2,6 +2,7 @@ using System;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Plugins.Floresta.Services;
 using NBitcoin;
 using Xunit;
 
@@ -34,6 +35,9 @@ public class FlorestaElectrumIntegrationTests
         Assert.Equal("1.4", version.protocolVersion);
         Assert.Equal(JsonValueKind.Object, features.ValueKind);
         Assert.Equal("sha256", features.GetProperty("hash_function").GetString());
+        var expectedNetwork = Network.GetNetwork(_fixture.Settings.Network);
+        Assert.NotNull(expectedNetwork);
+        Assert.Null(FlorestaChainInfoParser.GetElectrumNetworkValidationError(features, expectedNetwork));
         Assert.True(header.Height >= 0);
         Assert.False(string.IsNullOrWhiteSpace(header.Hex));
         Assert.True(fee > 0m);

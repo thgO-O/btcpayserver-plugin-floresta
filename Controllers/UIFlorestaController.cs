@@ -55,6 +55,7 @@ public class UIFlorestaController : Controller
     public async Task<IActionResult> Settings(FlorestaSettings settings, string command)
     {
         var existingSettings = await _settingsRepository.GetSettingAsync<FlorestaSettings>() ?? new FlorestaSettings();
+        var reloadElectrum = HasElectrumEndpointChanged(existingSettings, settings);
         settings.PreserveSecretsFrom(existingSettings);
         SetViewBags(settings);
 
@@ -68,21 +69,36 @@ public class UIFlorestaController : Controller
                     NullLogger<FlorestaElectrumClient>.Instance);
                 await testClient.ConnectAsync(cts.Token);
                 var (sw, pv) = await testClient.ServerVersionAsync("BTCPayServer-Floresta", "1.4", cts.Token);
+                var serverFeatures = await testClient.ServerFeaturesAsync(cts.Token);
 
                 var rpcClient = new FlorestaRpcClient(settings, NullLogger<FlorestaRpcClient>.Instance);
                 var blockchainInfo = await rpcClient.GetBlockchainInfoAsync(cts.Token);
                 var chainInfo = FlorestaChainInfoParser.Parse(blockchainInfo);
+                var networkError = FlorestaChainInfoParser.GetNetworkValidationError(
+                    chainInfo,
+                    _statusMonitor.ExpectedChainName) ??
+                    FlorestaChainInfoParser.GetElectrumNetworkValidationError(
+                        serverFeatures,
+                        _statusMonitor.ExpectedNetwork);
                 ViewBag.Health = new FlorestaHealthSnapshot(
                     "Reachable",
                     sw,
                     true,
+                    chainInfo.Chain,
                     chainInfo.Height,
                     chainInfo.BestBlockHash,
                     chainInfo.IsInitialBlockDownload,
                     chainInfo.ValidatedHeight,
                     chainInfo.UtreexoRootCount,
                     DateTimeOffset.UtcNow,
-                    null);
+                    networkError);
+
+                if (networkError is not null)
+                {
+                    ViewBag.StatusMessage = $"Connection failed: {networkError}";
+                    return View(settings);
+                }
+
                 ViewBag.StatusMessage =
                     $"Connection successful. Electrum: {sw} protocol {pv}. RPC {FlorestaChainInfoParser.Format(chainInfo)}.";
                 if (FlorestaBackendMode.IsBackendReplacementEnabled() && settings.IsBitcoinBackendActive())
@@ -97,7 +113,7 @@ public class UIFlorestaController : Controller
 
         await _settingsRepository.UpdateSetting(settings);
         if (FlorestaBackendMode.IsBackendReplacementEnabled())
-            await RefreshStatusAfterSettingsUpdate();
+            await RefreshStatusAfterSettingsUpdate(reloadElectrum);
 
         if (command == "register")
         {
@@ -105,6 +121,12 @@ public class UIFlorestaController : Controller
             {
                 ViewBag.StatusMessage =
                     $"Floresta Bitcoin backend is inactive. Enable the plugin, enable Bitcoin backend mode, set {FlorestaBackendMode.ReplaceBackendEnvironmentVariable}=true, and restart BTCPay Server before registering descriptors.";
+                return View(settings);
+            }
+
+            if (!_statusMonitor.IsNetworkCompatible)
+            {
+                ViewBag.StatusMessage = "Descriptor registration failed: Floresta backend network has not been validated.";
                 return View(settings);
             }
 
@@ -132,6 +154,12 @@ public class UIFlorestaController : Controller
             {
                 ViewBag.StatusMessage =
                     $"Floresta Bitcoin backend is inactive. Enable the plugin, enable Bitcoin backend mode, set {FlorestaBackendMode.ReplaceBackendEnvironmentVariable}=true, and restart BTCPay Server before requesting a rescan.";
+                return View(settings);
+            }
+
+            if (!_statusMonitor.IsNetworkCompatible)
+            {
+                ViewBag.StatusMessage = "Rescan request failed: Floresta backend network has not been validated.";
                 return View(settings);
             }
 
@@ -199,12 +227,23 @@ public class UIFlorestaController : Controller
         ViewBag.ReplaceBackendEnvironmentVariable = FlorestaBackendMode.ReplaceBackendEnvironmentVariable;
     }
 
-    private async Task RefreshStatusAfterSettingsUpdate()
+    internal static bool HasElectrumEndpointChanged(FlorestaSettings existing, FlorestaSettings updated)
+    {
+        return existing is null || updated is null ||
+               !string.Equals(existing.ElectrumHost, updated.ElectrumHost, StringComparison.OrdinalIgnoreCase) ||
+               existing.ElectrumPort != updated.ElectrumPort ||
+               existing.ElectrumUseTls != updated.ElectrumUseTls;
+    }
+
+    private async Task RefreshStatusAfterSettingsUpdate(bool reloadElectrum = false)
     {
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            await _statusMonitor.RefreshAsync(cts.Token);
+            if (reloadElectrum)
+                await _statusMonitor.ReloadAsync(cts.Token);
+            else
+                await _statusMonitor.RefreshAsync(cts.Token);
         }
         catch (Exception ex)
         {

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using NBitcoin;
 
 namespace BTCPayServer.Plugins.Floresta.Services;
 
@@ -9,12 +10,14 @@ public sealed record FlorestaChainInfo(
     string BestBlockHash = null,
     bool? IsInitialBlockDownload = null,
     int? ValidatedHeight = null,
-    int? UtreexoRootCount = null);
+    int? UtreexoRootCount = null,
+    string Chain = null);
 
 public sealed record FlorestaHealthSnapshot(
     string ElectrumStatus,
     string ElectrumVersion,
     bool? RpcReachable,
+    string RpcNetwork,
     int? Height,
     string BestBlockHash,
     bool? IsInitialBlockDownload,
@@ -35,7 +38,8 @@ internal static class FlorestaChainInfoParser
             GetString(blockchainInfo, "best_block") ?? GetString(blockchainInfo, "bestblockhash"),
             GetBool(blockchainInfo, "ibd") ?? GetBool(blockchainInfo, "initialblockdownload"),
             GetInt32(blockchainInfo, "validated") ?? GetInt32(blockchainInfo, "blocks"),
-            GetInt32(blockchainInfo, "root_count"));
+            GetInt32(blockchainInfo, "root_count"),
+            GetString(blockchainInfo, "chain"));
     }
 
     public static string Format(FlorestaChainInfo chainInfo)
@@ -45,6 +49,8 @@ internal static class FlorestaChainInfoParser
             $"height: {chainInfo.Height?.ToString() ?? "unknown"}"
         };
 
+        if (!string.IsNullOrWhiteSpace(chainInfo.Chain))
+            parts.Add($"chain: {chainInfo.Chain.Trim()}");
         if (!string.IsNullOrEmpty(chainInfo.BestBlockHash))
             parts.Add($"best: {ShortHash(chainInfo.BestBlockHash)}");
         if (chainInfo.IsInitialBlockDownload is not null)
@@ -55,6 +61,58 @@ internal static class FlorestaChainInfoParser
             parts.Add($"roots: {chainInfo.UtreexoRootCount.Value}");
 
         return string.Join(", ", parts);
+    }
+
+    public static string GetNetworkValidationError(FlorestaChainInfo chainInfo, ChainName expectedChain)
+    {
+        var reportedChain = chainInfo?.Chain?.Trim();
+        if (string.IsNullOrEmpty(reportedChain))
+            return $"Floresta did not report its Bitcoin network; BTCPay expects {expectedChain}.";
+
+        var actualChain = reportedChain.ToLowerInvariant() switch
+        {
+            "bitcoin" or "main" => ChainName.Mainnet,
+            "testnet" or "test" => ChainName.Testnet,
+            "regtest" => ChainName.Regtest,
+            "signet" => NBitcoin.Bitcoin.Instance.Signet.ChainName,
+            _ => null
+        };
+
+        if (actualChain is null)
+        {
+            return $"Floresta reported unsupported network '{reportedChain}'; " +
+                   $"BTCPay expects {expectedChain}.";
+        }
+
+        return actualChain == expectedChain
+            ? null
+            : $"Floresta network mismatch: BTCPay expects {expectedChain}, " +
+              $"but Floresta reports {reportedChain}.";
+    }
+
+    public static string GetElectrumNetworkValidationError(JsonElement serverFeatures, Network expectedNetwork)
+    {
+        var expectedGenesis = expectedNetwork.GetGenesis().GetHash().ToString();
+        var reportedGenesis = serverFeatures.ValueKind == JsonValueKind.Object
+            ? GetString(serverFeatures, "genesis_hash")?.Trim()
+            : null;
+
+        if (string.IsNullOrEmpty(reportedGenesis))
+        {
+            return $"Floresta Electrum did not report its genesis hash; " +
+                   $"BTCPay expects {expectedNetwork.ChainName} ({expectedGenesis}).";
+        }
+
+        if (!IsHash(reportedGenesis))
+        {
+            return $"Floresta Electrum reported invalid genesis hash '{reportedGenesis}'; " +
+                   $"BTCPay expects {expectedNetwork.ChainName} ({expectedGenesis}).";
+        }
+
+        return string.Equals(reportedGenesis, expectedGenesis, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : $"Floresta Electrum network mismatch: BTCPay expects {expectedNetwork.ChainName} " +
+              $"genesis {expectedGenesis}, but Electrum reports {reportedGenesis}.";
     }
 
     public static string ShortHash(string hash)
@@ -94,5 +152,19 @@ internal static class FlorestaChainInfoParser
         return element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
             ? property.GetString()
             : null;
+    }
+
+    private static bool IsHash(string value)
+    {
+        if (value.Length != 64)
+            return false;
+
+        foreach (var character in value)
+        {
+            if (!Uri.IsHexDigit(character))
+                return false;
+        }
+
+        return true;
     }
 }

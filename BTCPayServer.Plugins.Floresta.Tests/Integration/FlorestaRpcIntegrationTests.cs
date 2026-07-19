@@ -32,7 +32,9 @@ public class FlorestaRpcIntegrationTests
         Assert.True(chainInfo.Height >= 0);
         Assert.True(chainInfo.ValidatedHeight >= 0);
         Assert.False(string.IsNullOrWhiteSpace(chainInfo.BestBlockHash));
-        Assert.Equal(_fixture.Settings.Network, info.GetProperty("chain").GetString(), ignoreCase: true);
+        var expectedNetwork = Network.GetNetwork(_fixture.Settings.Network);
+        Assert.NotNull(expectedNetwork);
+        Assert.Null(FlorestaChainInfoParser.GetNetworkValidationError(chainInfo, expectedNetwork.ChainName));
     }
 
     [Fact]
