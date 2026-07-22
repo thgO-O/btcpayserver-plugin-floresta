@@ -39,6 +39,7 @@ public class FlorestaListener : IHostedService
     private readonly ILogger<FlorestaListener> _logger;
     private readonly SemaphoreSlim _initializationLock = new(1, 1);
     private readonly object _paymentPollingGate = new();
+    private readonly FlorestaBackgroundTasks _backgroundTasks = new();
     private CancellationTokenSource _cts;
     private Task _listenTask;
     private volatile bool _listenerInitialized;
@@ -96,9 +97,15 @@ public class FlorestaListener : IHostedService
         _electrumClient.OnReconnected -= OnReconnected;
 
         _cts?.Cancel();
-        if (_listenTask != null)
+        try
         {
-            try { await _listenTask; } catch (OperationCanceledException) { }
+            await Task.WhenAll(
+                    _listenTask ?? Task.CompletedTask,
+                    _backgroundTasks.StopAsync(cancellationToken))
+                .WaitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
         }
     }
 
@@ -182,11 +189,10 @@ public class FlorestaListener : IHostedService
 
     private void OnScripthashNotification(string scripthash, string status)
     {
-        _ = Task.Run(async () =>
+        _ = _backgroundTasks.Run(async ct =>
         {
             try
             {
-                var ct = _cts?.Token ?? CancellationToken.None;
                 if (!await IsBitcoinBackendActiveAsync(ct) || !_statusMonitor.IsNetworkCompatible)
                     return;
 
@@ -194,6 +200,9 @@ public class FlorestaListener : IHostedService
 
                 await ProcessNewTransactions(newTxs, ct);
                 await RequestPaymentPollingAsync(ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
             }
             catch (Exception ex)
             {
@@ -204,11 +213,10 @@ public class FlorestaListener : IHostedService
 
     private void OnNewBlock(FlorestaElectrumHeaderNotification header)
     {
-        _ = Task.Run(async () =>
+        _ = _backgroundTasks.Run(async ct =>
         {
             try
             {
-                var ct = _cts?.Token ?? CancellationToken.None;
                 if (!await IsBitcoinBackendActiveAsync(ct))
                     return;
 
@@ -223,6 +231,9 @@ public class FlorestaListener : IHostedService
                 await RequestPaymentPollingAsync(ct);
                 await PublishChainUpdate(ct);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error processing new block at height {Height}", header.Height);
@@ -230,11 +241,15 @@ public class FlorestaListener : IHostedService
         });
     }
 
-    private async Task OnReconnected()
+    private Task OnReconnected()
+    {
+        return _backgroundTasks.Run(ProcessReconnectAsync);
+    }
+
+    private async Task ProcessReconnectAsync(CancellationToken ct)
     {
         try
         {
-            var ct = _cts?.Token ?? CancellationToken.None;
             if (!await IsBitcoinBackendActiveAsync(ct))
                 return;
 
@@ -251,6 +266,9 @@ public class FlorestaListener : IHostedService
             await ProcessNewTransactions(newTxs, ct);
             await RequestPaymentPollingAsync(ct);
             await PublishChainUpdate(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
         }
         catch (Exception ex)
         {

@@ -55,6 +55,8 @@ public class FlorestaPluginTests
             Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(FlorestaHttpHandler));
             Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(FlorestaWatchOnlyWalletSetupFilter));
             Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IHostedService));
+            Assert.Contains(services, descriptor =>
+                IsHostedServiceRegistrationFor<FlorestaWalletTracker>(services, descriptor));
         });
     }
 
@@ -125,6 +127,8 @@ public class FlorestaPluginTests
             Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(FlorestaDbMigrationHostedService));
             Assert.Contains(services, descriptor =>
                 IsHostedServiceRegistrationFor<FlorestaDbMigrationHostedService>(services, descriptor));
+            Assert.Contains(services, descriptor =>
+                IsHostedServiceRegistrationFor<FlorestaWalletTracker>(services, descriptor));
             Assert.Contains(services, descriptor =>
                 IsHostedServiceRegistrationFor<UnrelatedHostedService>(services, descriptor));
             Assert.Contains(services, descriptor =>

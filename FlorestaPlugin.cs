@@ -73,8 +73,6 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         // 2. Register Floresta engine
         // ──────────────────────────────────────────────
 
-        services.AddSingleton<FlorestaWalletTracker>();
-
         // DB context
         services.AddSingleton<FlorestaDbContextFactory>();
         services.AddDbContext<FlorestaDbContext>((provider, o) =>
@@ -85,6 +83,10 @@ public class FlorestaPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<FlorestaDbMigrationHostedService>();
         services.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(sp =>
             sp.GetRequiredService<FlorestaDbMigrationHostedService>());
+
+        services.AddSingleton<FlorestaWalletTracker>();
+        services.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(sp =>
+            sp.GetRequiredService<FlorestaWalletTracker>());
 
         // HTTP handler for shimming ExplorerClient calls
         services.AddSingleton<FlorestaHttpHandler>();

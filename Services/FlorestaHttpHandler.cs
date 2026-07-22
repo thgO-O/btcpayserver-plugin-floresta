@@ -74,18 +74,7 @@ public class FlorestaHttpHandler(
                 // Descriptor registration and local derivation are part of the import contract:
                 // fail them before returning 200. Electrum subscription/sync is slow and can
                 // continue in the background.
-                var addresses = await tracker.PrepareWalletTrackingAsync(strategy, cancellationToken);
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await tracker.SubscribeAndSyncWalletAsync(strategy, addresses, CancellationToken.None);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "Background tracking failed for wallet {WalletId}", LogSafeId.Hash(strategy));
-                    }
-                });
+                await tracker.PrepareAndStartTrackingAsync(strategy, cancellationToken);
                 // Return empty 200 — ExplorerClient.TrackAsync uses SendAsync<string>,
                 // which returns default(string) when ContentLength == 0.
                 // Returning JSON like {} would fail string deserialization.
@@ -261,9 +250,8 @@ public class FlorestaHttpHandler(
                 var query = request.RequestUri?.Query ?? "";
                 var scan = NormalizeScanParameters(
                     ExtractQueryInt(query, "gapLimit"),
-                    ExtractQueryInt(query, "from"),
-                    ExtractQueryInt(query, "batchSize"));
-                tracker.StartScan(strategy, scan.GapLimit, scan.From, scan.BatchSize);
+                    ExtractQueryInt(query, "from"));
+                tracker.StartScan(strategy, scan.GapLimit, scan.From);
                 return new HttpResponseMessage(HttpStatusCode.OK);
             }
 
@@ -569,18 +557,14 @@ public class FlorestaHttpHandler(
     }
 
     internal const int DefaultScanGapLimit = 100;
-    internal const int DefaultScanBatchSize = 100;
-    internal const int MaxScanBatchSize = 500;
 
-    internal static (int GapLimit, int From, int BatchSize) NormalizeScanParameters(
+    internal static (int GapLimit, int From) NormalizeScanParameters(
         int? gapLimit,
-        int? from,
-        int? batchSize)
+        int? from)
     {
         return (
             Math.Clamp(gapLimit ?? DefaultScanGapLimit, 1, FlorestaSettings.MaxGapLimit),
-            Math.Max(from ?? 0, 0),
-            Math.Clamp(batchSize ?? DefaultScanBatchSize, 1, MaxScanBatchSize));
+            Math.Max(from ?? 0, 0));
     }
 
     internal static KeyPath[] DeserializeReservationKeyPaths(string body, JsonSerializerSettings jsonSettings)
