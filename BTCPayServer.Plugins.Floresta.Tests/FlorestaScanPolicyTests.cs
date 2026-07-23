@@ -8,11 +8,10 @@ public class FlorestaScanPolicyTests
     [Fact]
     public void ScanParametersDefaultToBoundedValues()
     {
-        var scan = FlorestaHttpHandler.NormalizeScanParameters(null, null, null);
+        var scan = FlorestaHttpHandler.NormalizeScanParameters(null, null);
 
         Assert.Equal(FlorestaHttpHandler.DefaultScanGapLimit, scan.GapLimit);
         Assert.Equal(0, scan.From);
-        Assert.Equal(FlorestaHttpHandler.DefaultScanBatchSize, scan.BatchSize);
     }
 
     [Fact]
@@ -20,11 +19,9 @@ public class FlorestaScanPolicyTests
     {
         var scan = FlorestaHttpHandler.NormalizeScanParameters(
             int.MaxValue,
-            -12,
-            int.MaxValue);
+            -12);
 
         Assert.Equal(FlorestaSettings.MaxGapLimit, scan.GapLimit);
         Assert.Equal(0, scan.From);
-        Assert.Equal(FlorestaHttpHandler.MaxScanBatchSize, scan.BatchSize);
     }
 }

@@ -2,12 +2,14 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Plugins.Floresta.Data;
 using BTCPayServer.Plugins.Floresta.Services;
 using BTCPayServer.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
 using NBXplorer.DerivationStrategy;
@@ -15,8 +17,10 @@ using NBXplorer.Models;
 
 namespace BTCPayServer.Plugins.Floresta;
 
-public class FlorestaWalletTracker
+public class FlorestaWalletTracker : IHostedService
 {
+    internal const string ScanCanceledError = "Scan canceled.";
+
     private readonly FlorestaElectrumClient _client;
     private readonly FlorestaFeeProvider _feeProvider;
     private readonly FlorestaRpcClient _rpcClient;
@@ -30,9 +34,11 @@ public class FlorestaWalletTracker
     private readonly FlorestaUtxoCache _utxoCache;
     private readonly FlorestaWalletSync _walletSync;
     private readonly FlorestaTransactionBroadcaster _broadcaster;
+    private readonly FlorestaBackgroundTasks _backgroundTasks = new();
 
     private readonly ConcurrentDictionary<string, DerivationStrategyBase> _trackedStrategies = new();
     private readonly ConcurrentDictionary<string, ScanUTXOInformation> _scanStates = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<Exception>> _trackingPreparations = new();
     private Network _network;
     private DerivationStrategyFactory _derivationFactory;
     private int _tipHeight;
@@ -76,6 +82,11 @@ public class FlorestaWalletTracker
             _logger);
         _broadcaster = new FlorestaTransactionBroadcaster(_rpcClient, _client);
     }
+
+    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task StopAsync(CancellationToken cancellationToken) =>
+        _backgroundTasks.StopAsync(cancellationToken);
 
     private void ConfigureNetwork()
     {
@@ -261,6 +272,89 @@ public class FlorestaWalletTracker
         await _walletSync.SubscribeTrackedAddressesAsync(addresses, ct);
         await _walletSync.SyncWalletStateAsync(strategyStr, addresses, ct);
         _logger.LogInformation("Now tracking wallet {WalletId}", LogSafeId.Hash(strategyStr));
+    }
+
+    public Task PrepareAndStartTrackingAsync(string strategyStr, CancellationToken ct)
+    {
+        return PrepareAndStartTrackingAsync(
+            strategyStr,
+            token => PrepareWalletTrackingAsync(strategyStr, token),
+            (addresses, token) => SubscribeAndSyncWalletAsync(strategyStr, addresses, token),
+            ct);
+    }
+
+    internal async Task PrepareAndStartTrackingAsync(
+        string strategyStr,
+        Func<CancellationToken, Task<List<TrackedAddress>>> prepare,
+        Func<List<TrackedAddress>, CancellationToken, Task> sync,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        var candidate = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var preparation = _trackingPreparations.GetOrAdd(strategyStr, candidate);
+        var ownsPreparation = ReferenceEquals(candidate, preparation);
+
+        if (ownsPreparation)
+        {
+            var task = _backgroundTasks.TryRun(
+                GetTrackingJobKey(strategyStr),
+                token => RunTrackingJobAsync(strategyStr, preparation, prepare, sync, token),
+                onCompleted: () => RemoveTrackingPreparation(strategyStr, preparation));
+            if (task is null)
+            {
+                RemoveTrackingPreparation(strategyStr, preparation);
+                preparation.TrySetResult(new InvalidOperationException("Floresta wallet tracker is stopping."));
+            }
+        }
+
+        var error = await preparation.Task.WaitAsync(ct);
+        if (error is not null)
+            ExceptionDispatchInfo.Capture(error).Throw();
+    }
+
+    private static string GetTrackingJobKey(string strategyStr) => $"tracking:{strategyStr}";
+
+    private async Task RunTrackingJobAsync(
+        string strategyStr,
+        TaskCompletionSource<Exception> preparation,
+        Func<CancellationToken, Task<List<TrackedAddress>>> prepare,
+        Func<List<TrackedAddress>, CancellationToken, Task> sync,
+        CancellationToken ct)
+    {
+        try
+        {
+            var addresses = await prepare(ct);
+            ct.ThrowIfCancellationRequested();
+            preparation.TrySetResult(null);
+            await sync(addresses, ct);
+        }
+        catch (OperationCanceledException ex) when (ct.IsCancellationRequested)
+        {
+            preparation.TrySetResult(ex);
+            _logger.LogDebug("Background tracking canceled for wallet {WalletId}", LogSafeId.Hash(strategyStr));
+        }
+        catch (Exception ex)
+        {
+            var failedDuringPreparation = preparation.TrySetResult(ex);
+            _logger.LogError(
+                ex,
+                failedDuringPreparation
+                    ? "Wallet preparation failed for wallet {WalletId}"
+                    : "Background tracking failed for wallet {WalletId}",
+                LogSafeId.Hash(strategyStr));
+        }
+    }
+
+    private void RemoveTrackingPreparation(
+        string strategyStr,
+        TaskCompletionSource<Exception> preparation)
+    {
+        if (_trackingPreparations.TryGetValue(strategyStr, out var current) &&
+            ReferenceEquals(current, preparation))
+        {
+            _trackingPreparations.TryRemove(strategyStr, out _);
+        }
     }
 
     private async Task<List<TrackedAddress>> GetTrackedAddressesAsync(string strategyStr, CancellationToken ct)
@@ -776,7 +870,20 @@ public class FlorestaWalletTracker
         return state;
     }
 
-    public void StartScan(string strategyStr, int gapLimit, int startingIndex, int batchSize)
+    public bool StartScan(string strategyStr, int gapLimit, int startingIndex)
+    {
+        return StartScan(
+            strategyStr,
+            gapLimit,
+            startingIndex,
+            (info, ct) => RescanWalletAsync(strategyStr, gapLimit, startingIndex, info, ct));
+    }
+
+    internal bool StartScan(
+        string strategyStr,
+        int gapLimit,
+        int startingIndex,
+        Func<ScanUTXOInformation, CancellationToken, Task> scan)
     {
         var info = new ScanUTXOInformation
         {
@@ -790,32 +897,59 @@ public class FlorestaWalletTracker
                 OverallProgress = 0
             }
         };
-        _scanStates[strategyStr] = info;
 
-        _ = Task.Run(async () =>
+        var task = _backgroundTasks.TryRun($"scan:{strategyStr}", async ct =>
         {
             try
             {
-                info.Status = ScanUTXOStatus.Pending;
-                info.Progress.StartedAt = DateTimeOffset.UtcNow;
-                await RescanWalletAsync(strategyStr, gapLimit, startingIndex, info, CancellationToken.None);
-                info.Status = ScanUTXOStatus.Complete;
-                info.Progress.CompletedAt = DateTimeOffset.UtcNow;
-                info.Progress.OverallProgress = 100;
+                await RunScanAsync(info, token => scan(info, token), ct);
             }
             catch (Exception ex)
             {
-                info.Status = ScanUTXOStatus.Error;
-                info.Error = ex.Message;
                 _logger.LogError(ex, "Scan failed for wallet {WalletId}", LogSafeId.Hash(strategyStr));
             }
-        });
+        }, () => _scanStates[strategyStr] = info);
+
+        return task is not null;
+    }
+
+    internal static async Task RunScanAsync(
+        ScanUTXOInformation info,
+        Func<CancellationToken, Task> scan,
+        CancellationToken ct)
+    {
+        try
+        {
+            info.Status = ScanUTXOStatus.Pending;
+            info.Progress.StartedAt = DateTimeOffset.UtcNow;
+            await scan(ct);
+            ct.ThrowIfCancellationRequested();
+            info.Status = ScanUTXOStatus.Complete;
+            info.Progress.CompletedAt = DateTimeOffset.UtcNow;
+            info.Progress.OverallProgress = 100;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            info.Status = ScanUTXOStatus.Error;
+            info.Error = ScanCanceledError;
+            info.Progress.CompletedAt = DateTimeOffset.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            info.Status = ScanUTXOStatus.Error;
+            info.Error = ex.Message;
+            info.Progress.CompletedAt = DateTimeOffset.UtcNow;
+            throw;
+        }
     }
 
     private async Task RescanWalletAsync(
         string strategyStr, int gapLimit, int startingIndex,
         ScanUTXOInformation scanInfo, CancellationToken ct)
     {
+        if (!_client.IsConnected)
+            throw new InvalidOperationException("Floresta Electrum is not connected.");
+
         var settings = await GetSettingsAsync();
         var descriptorRegistration = await PrepareDescriptorRegistrationAsync(strategyStr, settings, ct);
         if (!descriptorRegistration.Succeeded)
@@ -852,19 +986,16 @@ public class FlorestaWalletTracker
 
         scanInfo.Progress.Count = allAddresses.Count;
 
-        if (_client.IsConnected)
-        {
-            await _walletSync.SyncWalletStateAsync(
-                strategyStr,
-                allAddresses,
-                ct,
-                (processed, total) =>
-                {
-                    scanInfo.Progress.Count = total;
-                    scanInfo.Progress.TotalSearched = processed;
-                    scanInfo.Progress.OverallProgress = total == 0 ? 100 : processed * 100 / total;
-                });
-        }
+        await _walletSync.SyncWalletStateAsync(
+            strategyStr,
+            allAddresses,
+            ct,
+            (processed, total) =>
+            {
+                scanInfo.Progress.Count = total;
+                scanInfo.Progress.TotalSearched = processed;
+                scanInfo.Progress.OverallProgress = total == 0 ? 100 : processed * 100 / total;
+            });
 
         await using (var ctx = _dbFactory.CreateContext())
         {
