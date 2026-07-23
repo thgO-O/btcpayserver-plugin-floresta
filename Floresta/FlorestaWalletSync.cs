@@ -16,6 +16,18 @@ namespace BTCPayServer.Plugins.Floresta;
 
 internal sealed class FlorestaWalletSync
 {
+    internal readonly record struct WalletAddressSyncSummary(
+        int Attempted,
+        int Succeeded,
+        int Failed)
+    {
+        public bool IsComplete => Failed == 0;
+    }
+
+    internal sealed record WalletSyncResult(
+        List<FlorestaWalletTracker.NewTransactionInfo> NewTransactions,
+        WalletAddressSyncSummary Summary);
+
     private readonly FlorestaDbContextFactory _dbFactory;
     private readonly FlorestaElectrumClient _client;
     private readonly FlorestaAddressPool _addressPool;
@@ -78,6 +90,25 @@ internal sealed class FlorestaWalletSync
         CancellationToken ct,
         Action<int, int> reportProgress = null)
     {
+        var result = await SyncWalletStateWithResultAsync(walletId, addresses, ct, reportProgress);
+        return result.NewTransactions;
+    }
+
+    internal Task<WalletSyncResult> SyncWalletStateForScanAsync(
+        string walletId,
+        List<TrackedAddress> addresses,
+        CancellationToken ct,
+        Action<int, int> reportProgress)
+    {
+        return SyncWalletStateWithResultAsync(walletId, addresses, ct, reportProgress);
+    }
+
+    private async Task<WalletSyncResult> SyncWalletStateWithResultAsync(
+        string walletId,
+        List<TrackedAddress> addresses,
+        CancellationToken ct,
+        Action<int, int> reportProgress)
+    {
         var walletLock = GetWalletLock(walletId);
         await walletLock.WaitAsync(ct);
         try
@@ -128,7 +159,8 @@ internal sealed class FlorestaWalletSync
                     walletAddresses.Add(source);
             }
 
-            return await SyncWalletStateCoreAsync(walletId, walletAddresses, ct, null);
+            var result = await SyncWalletStateCoreAsync(walletId, walletAddresses, ct, null);
+            return result.NewTransactions;
         }
         finally
         {
@@ -193,7 +225,7 @@ internal sealed class FlorestaWalletSync
         return newTxs;
     }
 
-    private async Task<List<FlorestaWalletTracker.NewTransactionInfo>> SyncWalletStateCoreAsync(
+    private async Task<WalletSyncResult> SyncWalletStateCoreAsync(
         string walletId,
         List<TrackedAddress> addresses,
         CancellationToken ct,
@@ -203,7 +235,6 @@ internal sealed class FlorestaWalletSync
         var addressesToSubscribe = new List<TrackedAddress>();
         var newTxs = new List<FlorestaWalletTracker.NewTransactionInfo>();
         var observedHistoryTxids = new HashSet<string>();
-        var syncHadErrors = false;
         var existingTxids = await ctx.Transactions
             .Where(t => t.WalletId == walletId)
             .Select(t => t.Txid)
@@ -214,14 +245,9 @@ internal sealed class FlorestaWalletSync
         var persistedWalletAddresses = await FlorestaWalletTracker.GetTrackedAddressSourcesAsync(ctx, walletId, ct);
         var walletAddresses = BuildWalletAddressMap(persistedWalletAddresses, addresses, walletId);
 
-        var processed = 0;
-        var total = addresses.Count;
-        var queuedOrProcessed = new HashSet<string>(addresses.Select(a => a.Scripthash));
-        var pending = new Queue<TrackedAddress>(addresses);
-        while (pending.Count > 0)
-        {
-            var addr = pending.Dequeue();
-            try
+        var summary = await ProcessAddressQueueAsync(
+            addresses,
+            async (addr, token) =>
             {
                 if (walletAddresses.TryGetValue(addr.Scripthash, out var trackedAddress))
                 {
@@ -233,18 +259,80 @@ internal sealed class FlorestaWalletSync
                         walletAddresses,
                         existingTxids,
                         observedHistoryTxids,
-                        ct,
+                        token,
                         addressesToSubscribe));
 
-                    foreach (var added in addressesToSubscribe.Skip(beforeSubscribeCount))
-                    {
+                    var addedAddresses = addressesToSubscribe.Skip(beforeSubscribeCount).ToList();
+                    foreach (var added in addedAddresses)
                         walletAddresses[added.Scripthash] = added;
-                        if (queuedOrProcessed.Add(added.Scripthash))
-                        {
-                            pending.Enqueue(added);
-                            total++;
-                        }
-                    }
+                    return addedAddresses;
+                }
+
+                return Array.Empty<TrackedAddress>();
+            },
+            (addr, ex) =>
+            {
+                _logger.LogWarning(ex, "Error syncing address {Address} ({Scripthash})",
+                    addr.Address, addr.Scripthash);
+            },
+            reportProgress,
+            ct);
+
+        var removedCount = await MarkTransactionsMissingFromHistoryAsync(
+            ctx,
+            walletId,
+            observedHistoryTxids,
+            summary.IsComplete && addresses.Count > 0,
+            ct);
+        if (removedCount > 0)
+        {
+            _logger.LogInformation(
+                "Marked {TransactionCount} cached Floresta transactions missing from wallet history as removed for wallet {WalletId}",
+                removedCount,
+                LogSafeId.Hash(walletId));
+        }
+
+        await ctx.SaveChangesAsync(ct);
+        await SubscribeTrackedAddressesAsync(addressesToSubscribe, ct);
+        return new WalletSyncResult(newTxs, summary);
+    }
+
+    internal static async Task<WalletAddressSyncSummary> ProcessAddressQueueAsync(
+        IReadOnlyCollection<TrackedAddress> initialAddresses,
+        Func<TrackedAddress, CancellationToken, Task<IReadOnlyCollection<TrackedAddress>>> processAddress,
+        Action<TrackedAddress, Exception> onError,
+        Action<int, int> reportProgress,
+        CancellationToken ct)
+    {
+        var pending = new Queue<TrackedAddress>();
+        var queuedOrProcessed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var initialAddress in initialAddresses)
+        {
+            if (queuedOrProcessed.Add(initialAddress.Scripthash))
+                pending.Enqueue(initialAddress);
+        }
+        var attempted = 0;
+        var succeeded = 0;
+        var failed = 0;
+        var total = pending.Count;
+
+        while (pending.Count > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            var address = pending.Dequeue();
+            attempted++;
+            try
+            {
+                var addedAddresses = await processAddress(address, ct) ?? Array.Empty<TrackedAddress>();
+                ct.ThrowIfCancellationRequested();
+                succeeded++;
+                foreach (var addedAddress in addedAddresses)
+                {
+                    if (!queuedOrProcessed.Add(addedAddress.Scripthash))
+                        continue;
+
+                    pending.Enqueue(addedAddress);
+                    total++;
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -253,32 +341,14 @@ internal sealed class FlorestaWalletSync
             }
             catch (Exception ex)
             {
-                syncHadErrors = true;
-                _logger.LogWarning(ex, "Error syncing address {Address} ({Scripthash})",
-                    addr.Address, addr.Scripthash);
+                failed++;
+                onError?.Invoke(address, ex);
             }
-            finally
-            {
-                processed++;
-                reportProgress?.Invoke(processed, total);
-            }
+
+            reportProgress?.Invoke(succeeded, total);
         }
 
-        if (!syncHadErrors && addresses.Count > 0)
-        {
-            var removedCount = await MarkTransactionsMissingFromHistoryAsync(ctx, walletId, observedHistoryTxids, ct);
-            if (removedCount > 0)
-            {
-                _logger.LogInformation(
-                    "Marked {TransactionCount} cached Floresta transactions missing from wallet history as removed for wallet {WalletId}",
-                    removedCount,
-                    LogSafeId.Hash(walletId));
-            }
-        }
-
-        await ctx.SaveChangesAsync(ct);
-        await SubscribeTrackedAddressesAsync(addressesToSubscribe, ct);
-        return newTxs;
+        return new WalletAddressSyncSummary(attempted, succeeded, failed);
     }
 
     private async Task<List<FlorestaWalletTracker.NewTransactionInfo>> SyncAddressAsync(
@@ -467,8 +537,12 @@ internal sealed class FlorestaWalletSync
 
     internal static int MarkTransactionsMissingFromHistory(
         IEnumerable<TrackedTransaction> transactions,
-        IReadOnlySet<string> observedHistoryTxids)
+        IReadOnlySet<string> observedHistoryTxids,
+        bool syncComplete)
     {
+        if (!syncComplete)
+            return 0;
+
         var removed = 0;
         foreach (var transaction in transactions)
         {
@@ -486,12 +560,16 @@ internal sealed class FlorestaWalletSync
         FlorestaDbContext ctx,
         string walletId,
         IReadOnlySet<string> observedHistoryTxids,
+        bool syncComplete,
         CancellationToken ct)
     {
+        if (!syncComplete)
+            return 0;
+
         var activeTransactions = await ctx.Transactions
             .Where(t => t.WalletId == walletId && t.RemovedAt == null)
             .ToListAsync(ct);
-        return MarkTransactionsMissingFromHistory(activeTransactions, observedHistoryTxids);
+        return MarkTransactionsMissingFromHistory(activeTransactions, observedHistoryTxids, true);
     }
 
     private sealed class ByteArrayComparer : IEqualityComparer<byte[]>

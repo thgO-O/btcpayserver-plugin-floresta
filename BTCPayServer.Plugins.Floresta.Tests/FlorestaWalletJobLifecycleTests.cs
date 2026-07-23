@@ -197,6 +197,69 @@ public class FlorestaWalletJobLifecycleTests
     }
 
     [Fact]
+    public async Task FailedScanCanStartAgain()
+    {
+        var tracker = CreateTracker();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        Assert.True(tracker.StartScan("wallet", 25, 0, (_, _) =>
+            Task.FromException(new InvalidOperationException(
+                FlorestaWalletTracker.ScanPartialError,
+                new InvalidOperationException("electrum-sensitive-detail")))));
+        await WaitUntilAsync(
+            () => tracker.GetScanState("wallet")?.Status == ScanUTXOStatus.Error,
+            timeout.Token);
+        var failedState = tracker.GetScanState("wallet");
+
+        Assert.Equal(FlorestaWalletTracker.ScanPartialError, failedState.Error);
+        Assert.DoesNotContain("electrum-sensitive-detail", failedState.Error);
+        Assert.NotNull(failedState.Progress.CompletedAt);
+        Assert.True(failedState.Progress.OverallProgress < 100);
+
+        var restarted = false;
+        while (!restarted)
+        {
+            timeout.Token.ThrowIfCancellationRequested();
+            restarted = tracker.StartScan("wallet", 25, 0, (_, _) => Task.CompletedTask);
+            if (!restarted)
+                await Task.Delay(10, timeout.Token);
+        }
+
+        await WaitUntilAsync(
+            () => !ReferenceEquals(failedState, tracker.GetScanState("wallet")) &&
+                  tracker.GetScanState("wallet")?.Status == ScanUTXOStatus.Complete,
+            timeout.Token);
+
+        await tracker.StopAsync(timeout.Token);
+    }
+
+    [Fact]
+    public async Task PartialScanResultCapsProgressStoresFoundAndSafeError()
+    {
+        var info = CreateScanInfo();
+        var summary = new FlorestaWalletSync.WalletAddressSyncSummary(
+            Attempted: 3,
+            Succeeded: 2,
+            Failed: 1);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            FlorestaWalletTracker.RunScanAsync(info, _ =>
+            {
+                info.Progress.OverallProgress = 100;
+                FlorestaWalletTracker.ApplyScanSyncResult(info, summary, found: 2);
+                return Task.CompletedTask;
+            }, CancellationToken.None));
+
+        Assert.Equal(FlorestaWalletTracker.ScanPartialError, exception.Message);
+        Assert.Equal(ScanUTXOStatus.Error, info.Status);
+        Assert.Equal(FlorestaWalletTracker.ScanPartialError, info.Error);
+        Assert.DoesNotContain("electrum-sensitive-detail", info.Error);
+        Assert.Equal(2, info.Progress.Found);
+        Assert.NotNull(info.Progress.CompletedAt);
+        Assert.Equal(99, info.Progress.OverallProgress);
+    }
+
+    [Fact]
     public async Task CancellationRequestedByCompletedScanBodyIsNotReportedAsComplete()
     {
         var info = CreateScanInfo();
@@ -204,13 +267,14 @@ public class FlorestaWalletJobLifecycleTests
 
         await FlorestaWalletTracker.RunScanAsync(info, _ =>
         {
+            info.Progress.OverallProgress = 100;
             cts.Cancel();
             return Task.CompletedTask;
         }, cts.Token);
 
         Assert.Equal(ScanUTXOStatus.Error, info.Status);
         Assert.Equal(FlorestaWalletTracker.ScanCanceledError, info.Error);
-        Assert.NotEqual(100, info.Progress.OverallProgress);
+        Assert.Equal(99, info.Progress.OverallProgress);
     }
 
     [Fact]
