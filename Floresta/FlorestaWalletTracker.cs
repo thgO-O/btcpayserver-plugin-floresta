@@ -20,6 +20,8 @@ namespace BTCPayServer.Plugins.Floresta;
 public class FlorestaWalletTracker : IHostedService
 {
     internal const string ScanCanceledError = "Scan canceled.";
+    internal const string ScanPartialError =
+        "One or more wallet addresses could not be synchronized. Check the server logs and try the scan again.";
 
     private readonly FlorestaElectrumClient _client;
     private readonly FlorestaFeeProvider _feeProvider;
@@ -933,14 +935,26 @@ public class FlorestaWalletTracker : IHostedService
             info.Status = ScanUTXOStatus.Error;
             info.Error = ScanCanceledError;
             info.Progress.CompletedAt = DateTimeOffset.UtcNow;
+            info.Progress.OverallProgress = Math.Min(info.Progress.OverallProgress, 99);
         }
         catch (Exception ex)
         {
             info.Status = ScanUTXOStatus.Error;
             info.Error = ex.Message;
             info.Progress.CompletedAt = DateTimeOffset.UtcNow;
+            info.Progress.OverallProgress = Math.Min(info.Progress.OverallProgress, 99);
             throw;
         }
+    }
+
+    internal static void ApplyScanSyncResult(
+        ScanUTXOInformation scanInfo,
+        FlorestaWalletSync.WalletAddressSyncSummary summary,
+        int found)
+    {
+        scanInfo.Progress.Found = found;
+        if (!summary.IsComplete)
+            throw new InvalidOperationException(ScanPartialError);
     }
 
     private async Task RescanWalletAsync(
@@ -986,7 +1000,7 @@ public class FlorestaWalletTracker : IHostedService
 
         scanInfo.Progress.Count = allAddresses.Count;
 
-        await _walletSync.SyncWalletStateAsync(
+        var syncResult = await _walletSync.SyncWalletStateForScanAsync(
             strategyStr,
             allAddresses,
             ct,
@@ -997,15 +1011,18 @@ public class FlorestaWalletTracker : IHostedService
                 scanInfo.Progress.OverallProgress = total == 0 ? 100 : processed * 100 / total;
             });
 
+        int found;
         await using (var ctx = _dbFactory.CreateContext())
         {
-            scanInfo.Progress.Found = await ctx.Utxos
+            found = await ctx.Utxos
                 .CountAsync(u => u.WalletId == strategyStr && !u.IsSpent, ct);
             if (scanInfo.Progress.TotalSearched == 0 && allAddresses.Count == 0)
             {
                 scanInfo.Progress.OverallProgress = 100;
             }
         }
+
+        ApplyScanSyncResult(scanInfo, syncResult.Summary, found);
     }
 
     // ─────────────────────────────────────────────

@@ -239,13 +239,30 @@ public class FlorestaConcurrencyTests
 
         var removed = FlorestaWalletSync.MarkTransactionsMissingFromHistory(
             new[] { present, missing, unconfirmed, alreadyRemoved },
-            new HashSet<string> { "present" });
+            new HashSet<string> { "present" },
+            syncComplete: true);
 
         Assert.Equal(2, removed);
         Assert.Equal(12, present.BlockHeight);
         Assert.NotNull(missing.RemovedAt);
         Assert.NotNull(unconfirmed.RemovedAt);
         Assert.NotNull(alreadyRemoved.RemovedAt);
+    }
+
+    [Fact]
+    public void IncompleteSyncDoesNotMarkTransactionsAsRemoved()
+    {
+        var missing = new TrackedTransaction { Txid = "missing", BlockHeight = 12 };
+        var unconfirmed = new TrackedTransaction { Txid = "unconfirmed", BlockHeight = null };
+
+        var removed = FlorestaWalletSync.MarkTransactionsMissingFromHistory(
+            new[] { missing, unconfirmed },
+            new HashSet<string>(),
+            syncComplete: false);
+
+        Assert.Equal(0, removed);
+        Assert.Null(missing.RemovedAt);
+        Assert.Null(unconfirmed.RemovedAt);
     }
 
     private static FlorestaStatusMonitor CreateStatusMonitor(ChainName? chainName = null)
