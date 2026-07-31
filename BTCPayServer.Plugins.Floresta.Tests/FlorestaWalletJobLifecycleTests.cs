@@ -21,6 +21,7 @@ public class FlorestaWalletJobLifecycleTests
         var tracker = CreateTracker();
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var syncEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var preparationCalls = 0;
         var syncCalls = 0;
@@ -39,6 +40,7 @@ public class FlorestaWalletJobLifecycleTests
                 (_, _) =>
                 {
                     Interlocked.Increment(ref syncCalls);
+                    syncEntered.TrySetResult();
                     return Task.CompletedTask;
                 },
                 ct);
@@ -51,6 +53,7 @@ public class FlorestaWalletJobLifecycleTests
         Assert.Equal(1, Volatile.Read(ref preparationCalls));
         release.SetResult();
         await Task.WhenAll(first, second).WaitAsync(timeout.Token);
+        await syncEntered.Task.WaitAsync(timeout.Token);
         Assert.Equal(1, Volatile.Read(ref preparationCalls));
         Assert.Equal(1, Volatile.Read(ref syncCalls));
 
@@ -128,6 +131,317 @@ public class FlorestaWalletJobLifecycleTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => tracking);
         await stopping;
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ConcurrentTrackingAndScanSharePreparationWithoutSerializingTails(
+        bool trackingStartsFirst)
+    {
+        var tracker = CreateTracker();
+        var preparationEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var trackingWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scanWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePreparation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var trackingTailEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scanTailEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var trackingSyncEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseTails = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var preparationCalls = 0;
+        var trackingTailCalls = 0;
+        var trackingSyncCalls = 0;
+        var scanTailCalls = 0;
+
+        async Task<FlorestaWalletTracker.WalletPreparationContext> Prepare(CancellationToken token)
+        {
+            Interlocked.Increment(ref preparationCalls);
+            preparationEntered.TrySetResult();
+            await releasePreparation.Task.WaitAsync(token);
+            return CreateWalletPreparation();
+        }
+
+        Task StartTracking()
+        {
+            return tracker.PrepareAndStartTrackingAsync(
+                "wallet",
+                async token =>
+                {
+                    var shared = tracker.GetOrStartWalletPreparationAsync("wallet", Prepare, token);
+                    trackingWaiting.TrySetResult();
+                    await shared;
+                    Interlocked.Increment(ref trackingTailCalls);
+                    trackingTailEntered.TrySetResult();
+                    await releaseTails.Task.WaitAsync(token);
+                    return new List<TrackedAddress>();
+                },
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref trackingSyncCalls);
+                    trackingSyncEntered.TrySetResult();
+                    return Task.CompletedTask;
+                },
+                timeout.Token);
+        }
+
+        bool StartScan()
+        {
+            return tracker.StartScan("wallet", 25, 0, async (_, token) =>
+            {
+                var shared = tracker.GetOrStartWalletPreparationAsync("wallet", Prepare, token);
+                scanWaiting.TrySetResult();
+                await shared;
+                Interlocked.Increment(ref scanTailCalls);
+                scanTailEntered.TrySetResult();
+                await releaseTails.Task.WaitAsync(token);
+            });
+        }
+
+        Task tracking;
+        if (trackingStartsFirst)
+        {
+            tracking = StartTracking();
+            await preparationEntered.Task.WaitAsync(timeout.Token);
+            Assert.True(StartScan());
+        }
+        else
+        {
+            Assert.True(StartScan());
+            await preparationEntered.Task.WaitAsync(timeout.Token);
+            tracking = StartTracking();
+        }
+
+        await Task.WhenAll(trackingWaiting.Task, scanWaiting.Task).WaitAsync(timeout.Token);
+        Assert.Equal(1, Volatile.Read(ref preparationCalls));
+
+        releasePreparation.SetResult();
+        await Task.WhenAll(trackingTailEntered.Task, scanTailEntered.Task).WaitAsync(timeout.Token);
+
+        Assert.Equal(1, Volatile.Read(ref preparationCalls));
+        Assert.Equal(1, Volatile.Read(ref trackingTailCalls));
+        Assert.Equal(1, Volatile.Read(ref scanTailCalls));
+
+        releaseTails.SetResult();
+        await tracking.WaitAsync(timeout.Token);
+        await WaitUntilAsync(
+            () => tracker.GetScanState("wallet")?.Status == ScanUTXOStatus.Complete,
+            timeout.Token);
+        await trackingSyncEntered.Task.WaitAsync(timeout.Token);
+
+        Assert.Equal(1, Volatile.Read(ref trackingSyncCalls));
+        await tracker.StopAsync(timeout.Token);
+    }
+
+    [Fact]
+    public async Task CanceledTrackingWaiterDoesNotCancelPreparationSharedWithScan()
+    {
+        var tracker = CreateTracker();
+        var preparationEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scanWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePreparation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var trackingFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var requestCanceled = new CancellationTokenSource();
+        var preparationCalls = 0;
+
+        async Task<FlorestaWalletTracker.WalletPreparationContext> Prepare(CancellationToken token)
+        {
+            Interlocked.Increment(ref preparationCalls);
+            preparationEntered.TrySetResult();
+            await releasePreparation.Task.WaitAsync(token);
+            return CreateWalletPreparation();
+        }
+
+        var tracking = tracker.PrepareAndStartTrackingAsync(
+            "wallet",
+            async token =>
+            {
+                await tracker.GetOrStartWalletPreparationAsync("wallet", Prepare, token);
+                return new List<TrackedAddress>();
+            },
+            (_, _) =>
+            {
+                trackingFinished.TrySetResult();
+                return Task.CompletedTask;
+            },
+            requestCanceled.Token);
+        await preparationEntered.Task.WaitAsync(timeout.Token);
+
+        Assert.True(tracker.StartScan("wallet", 25, 0, async (_, token) =>
+        {
+            var shared = tracker.GetOrStartWalletPreparationAsync("wallet", Prepare, token);
+            scanWaiting.TrySetResult();
+            await shared;
+        }));
+        await scanWaiting.Task.WaitAsync(timeout.Token);
+
+        requestCanceled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => tracking);
+
+        releasePreparation.SetResult();
+        await trackingFinished.Task.WaitAsync(timeout.Token);
+        await WaitUntilAsync(
+            () => tracker.GetScanState("wallet")?.Status == ScanUTXOStatus.Complete,
+            timeout.Token);
+
+        Assert.Equal(1, Volatile.Read(ref preparationCalls));
+        await tracker.StopAsync(timeout.Token);
+    }
+
+    [Fact]
+    public async Task SharedPreparationFailureReachesTrackingAndScanAndAllowsRetry()
+    {
+        var tracker = CreateTracker();
+        var preparationEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var trackingWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scanWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePreparation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var expected = new InvalidOperationException("shared preparation failed");
+        var preparationCalls = 0;
+        var trackingTailCalls = 0;
+        var scanTailCalls = 0;
+
+        async Task<FlorestaWalletTracker.WalletPreparationContext> FailPreparation(CancellationToken token)
+        {
+            Interlocked.Increment(ref preparationCalls);
+            preparationEntered.TrySetResult();
+            await releasePreparation.Task.WaitAsync(token);
+            throw expected;
+        }
+
+        var tracking = tracker.PrepareAndStartTrackingAsync(
+            "wallet",
+            async token =>
+            {
+                var shared = tracker.GetOrStartWalletPreparationAsync("wallet", FailPreparation, token);
+                trackingWaiting.TrySetResult();
+                await shared;
+                Interlocked.Increment(ref trackingTailCalls);
+                return new List<TrackedAddress>();
+            },
+            (_, _) => Task.CompletedTask,
+            timeout.Token);
+        await preparationEntered.Task.WaitAsync(timeout.Token);
+
+        Assert.True(tracker.StartScan("wallet", 25, 0, async (_, token) =>
+        {
+            var shared = tracker.GetOrStartWalletPreparationAsync("wallet", FailPreparation, token);
+            scanWaiting.TrySetResult();
+            await shared;
+            Interlocked.Increment(ref scanTailCalls);
+        }));
+        await Task.WhenAll(trackingWaiting.Task, scanWaiting.Task).WaitAsync(timeout.Token);
+
+        releasePreparation.SetResult();
+        var trackingError = await Assert.ThrowsAsync<InvalidOperationException>(() => tracking);
+        await WaitUntilAsync(
+            () => tracker.GetScanState("wallet")?.Status == ScanUTXOStatus.Error,
+            timeout.Token);
+
+        Assert.Same(expected, trackingError);
+        Assert.Equal(expected.Message, tracker.GetScanState("wallet")?.Error);
+        Assert.Equal(1, Volatile.Read(ref preparationCalls));
+        Assert.Equal(0, Volatile.Read(ref trackingTailCalls));
+        Assert.Equal(0, Volatile.Read(ref scanTailCalls));
+
+        var retryCalls = 0;
+        var retry = await tracker.GetOrStartWalletPreparationAsync(
+            "wallet",
+            _ =>
+            {
+                Interlocked.Increment(ref retryCalls);
+                return Task.FromResult(CreateWalletPreparation());
+            },
+            timeout.Token);
+
+        Assert.NotNull(retry);
+        Assert.Equal(1, Volatile.Read(ref retryCalls));
+        await tracker.StopAsync(timeout.Token);
+    }
+
+    [Fact]
+    public async Task DifferentWalletsPrepareInParallel()
+    {
+        var tracker = CreateTracker();
+        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        async Task<FlorestaWalletTracker.WalletPreparationContext> Prepare(
+            TaskCompletionSource entered,
+            CancellationToken token)
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return CreateWalletPreparation();
+        }
+
+        var first = tracker.GetOrStartWalletPreparationAsync(
+            "wallet-a",
+            token => Prepare(firstEntered, token),
+            timeout.Token);
+        var second = tracker.GetOrStartWalletPreparationAsync(
+            "wallet-b",
+            token => Prepare(secondEntered, token),
+            timeout.Token);
+
+        await Task.WhenAll(firstEntered.Task, secondEntered.Task).WaitAsync(timeout.Token);
+        release.SetResult();
+        await Task.WhenAll(first, second).WaitAsync(timeout.Token);
+
+        await tracker.StopAsync(timeout.Token);
+    }
+
+    [Fact]
+    public async Task ShutdownCancelsAndAwaitsSharedWalletPreparation()
+    {
+        var tracker = CreateTracker();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var preparation = tracker.GetOrStartWalletPreparationAsync(
+            "wallet",
+            async token =>
+            {
+                entered.TrySetResult();
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                }
+                finally
+                {
+                    cancellationObserved.TrySetResult();
+                    await releaseCleanup.Task;
+                    finished.TrySetResult();
+                }
+
+                return CreateWalletPreparation();
+            },
+            CancellationToken.None);
+        await entered.Task.WaitAsync(timeout.Token);
+
+        var stopping = tracker.StopAsync(timeout.Token);
+
+        await cancellationObserved.Task.WaitAsync(timeout.Token);
+        try
+        {
+            Assert.False(stopping.IsCompleted);
+            Assert.False(preparation.IsCompleted);
+        }
+        finally
+        {
+            releaseCleanup.TrySetResult();
+        }
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => preparation);
+        await stopping;
+        Assert.True(finished.Task.IsCompletedSuccessfully);
     }
 
     [Fact]
@@ -342,6 +656,22 @@ public class FlorestaWalletJobLifecycleTests
             Status = ScanUTXOStatus.Queued,
             Progress = new ScanUTXOProgress()
         };
+    }
+
+    private static FlorestaWalletTracker.WalletPreparationContext CreateWalletPreparation()
+    {
+        return new FlorestaWalletTracker.WalletPreparationContext(
+            new FlorestaSettings(),
+            new FlorestaDescriptorRegistrationResult(
+                new FlorestaDescriptorSet(
+                    "wallet",
+                    "descriptor-hash",
+                    "receive-descriptor",
+                    "change-descriptor"),
+                2,
+                0,
+                null),
+            null);
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition, CancellationToken ct)
