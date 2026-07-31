@@ -23,6 +23,20 @@ public class FlorestaWalletTracker : IHostedService
     internal const string ScanPartialError =
         "One or more wallet addresses could not be synchronized. Check the server logs and try the scan again.";
 
+    internal sealed record WalletPreparationContext(
+        FlorestaSettings Settings,
+        FlorestaDescriptorRegistrationResult DescriptorRegistration,
+        DateTimeOffset? DescriptorRegisteredAt);
+
+    private sealed class WalletPreparationFlight
+    {
+        public TaskCompletionSource Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public WalletPreparationContext Result { get; set; }
+        public Exception Error { get; set; }
+    }
+
     private readonly FlorestaElectrumClient _client;
     private readonly FlorestaFeeProvider _feeProvider;
     private readonly FlorestaRpcClient _rpcClient;
@@ -41,6 +55,7 @@ public class FlorestaWalletTracker : IHostedService
     private readonly ConcurrentDictionary<string, DerivationStrategyBase> _trackedStrategies = new();
     private readonly ConcurrentDictionary<string, ScanUTXOInformation> _scanStates = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<Exception>> _trackingPreparations = new();
+    private readonly ConcurrentDictionary<string, WalletPreparationFlight> _walletPreparations = new();
     private Network _network;
     private DerivationStrategyFactory _derivationFactory;
     private int _tipHeight;
@@ -162,6 +177,64 @@ public class FlorestaWalletTracker : IHostedService
 
     public async Task<List<TrackedAddress>> PrepareWalletTrackingAsync(string strategyStr, CancellationToken ct)
     {
+        var preparation = await PrepareWalletAsync(strategyStr, ct);
+
+        // Phase 1: derive addresses locally (fast, no network)
+        var addresses = await _addressPool.EnsureAddressesDerivedAsync(
+            strategyStr,
+            preparation.Settings,
+            preparation.DescriptorRegistration,
+            preparation.DescriptorRegisteredAt,
+            null,
+            ct);
+        if (addresses == null)
+            addresses = await GetTrackedAddressesAsync(strategyStr, ct);
+
+        return addresses;
+    }
+
+    private Task<WalletPreparationContext> PrepareWalletAsync(string strategyStr, CancellationToken ct)
+    {
+        return GetOrStartWalletPreparationAsync(
+            strategyStr,
+            token => PrepareWalletCoreAsync(strategyStr, token),
+            ct);
+    }
+
+    internal async Task<WalletPreparationContext> GetOrStartWalletPreparationAsync(
+        string strategyStr,
+        Func<CancellationToken, Task<WalletPreparationContext>> prepare,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        var candidate = new WalletPreparationFlight();
+        var preparation = _walletPreparations.GetOrAdd(strategyStr, candidate);
+        if (ReferenceEquals(candidate, preparation))
+        {
+            var task = _backgroundTasks.TryRun(
+                GetWalletPreparationJobKey(strategyStr),
+                token => ExecuteWalletPreparationAsync(preparation, prepare, token),
+                onCompleted: () => CompleteWalletPreparation(strategyStr, preparation));
+            if (task is null)
+            {
+                preparation.Error = new InvalidOperationException("Floresta wallet tracker is stopping.");
+                RemoveWalletPreparation(strategyStr, preparation);
+                preparation.Completion.TrySetResult();
+            }
+        }
+
+        await preparation.Completion.Task.WaitAsync(ct);
+        if (preparation.Error is not null)
+            ExceptionDispatchInfo.Capture(preparation.Error).Throw();
+
+        return preparation.Result;
+    }
+
+    private async Task<WalletPreparationContext> PrepareWalletCoreAsync(
+        string strategyStr,
+        CancellationToken ct)
+    {
         var settings = await GetSettingsAsync();
         var descriptorRegistration = await PrepareDescriptorRegistrationAsync(strategyStr, settings, ct);
         if (!descriptorRegistration.Succeeded)
@@ -178,18 +251,41 @@ public class FlorestaWalletTracker : IHostedService
             null, ct);
         await StartDescriptorRescanIfNeededAsync(strategyStr, settings, descriptorRegistration, ct);
 
-        // Phase 1: derive addresses locally (fast, no network)
-        var addresses = await _addressPool.EnsureAddressesDerivedAsync(
-            strategyStr,
-            settings,
-            descriptorRegistration,
-            descriptorRegisteredAt,
-            null,
-            ct);
-        if (addresses == null)
-            addresses = await GetTrackedAddressesAsync(strategyStr, ct);
+        return new WalletPreparationContext(settings, descriptorRegistration, descriptorRegisteredAt);
+    }
 
-        return addresses;
+    private static async Task ExecuteWalletPreparationAsync(
+        WalletPreparationFlight preparation,
+        Func<CancellationToken, Task<WalletPreparationContext>> prepare,
+        CancellationToken ct)
+    {
+        try
+        {
+            preparation.Result = await prepare(ct);
+        }
+        catch (Exception ex)
+        {
+            preparation.Error = ex;
+        }
+    }
+
+    private void CompleteWalletPreparation(
+        string strategyStr,
+        WalletPreparationFlight preparation)
+    {
+        RemoveWalletPreparation(strategyStr, preparation);
+        preparation.Completion.TrySetResult();
+    }
+
+    private void RemoveWalletPreparation(
+        string strategyStr,
+        WalletPreparationFlight preparation)
+    {
+        if (_walletPreparations.TryGetValue(strategyStr, out var current) &&
+            ReferenceEquals(current, preparation))
+        {
+            _walletPreparations.TryRemove(strategyStr, out _);
+        }
     }
 
     public async Task<List<NewTransactionInfo>> TrackAddressAsync(string addressText, CancellationToken ct)
@@ -316,6 +412,7 @@ public class FlorestaWalletTracker : IHostedService
     }
 
     private static string GetTrackingJobKey(string strategyStr) => $"tracking:{strategyStr}";
+    private static string GetWalletPreparationJobKey(string strategyStr) => $"preparation:{strategyStr}";
 
     private async Task RunTrackingJobAsync(
         string strategyStr,
@@ -964,27 +1061,13 @@ public class FlorestaWalletTracker : IHostedService
         if (!_client.IsConnected)
             throw new InvalidOperationException("Floresta Electrum is not connected.");
 
-        var settings = await GetSettingsAsync();
-        var descriptorRegistration = await PrepareDescriptorRegistrationAsync(strategyStr, settings, ct);
-        if (!descriptorRegistration.Succeeded)
-        {
-            await UpsertWalletDescriptorMetadataAsync(strategyStr, settings, descriptorRegistration, null,
-                descriptorRegistration.Error, ct, FlorestaWalletDescriptorMetadata.ApplyRescanNotRequested);
-            throw new InvalidOperationException($"Floresta descriptor registration failed: {descriptorRegistration.Error}");
-        }
-
-        var descriptorRegisteredAt = settings.AutoRegisterDescriptors && descriptorRegistration.Registered > 0
-            ? DateTimeOffset.UtcNow
-            : (DateTimeOffset?)null;
-        await UpsertWalletDescriptorMetadataAsync(strategyStr, settings, descriptorRegistration, descriptorRegisteredAt,
-            null, ct);
-        await StartDescriptorRescanIfNeededAsync(strategyStr, settings, descriptorRegistration, ct);
+        var preparation = await PrepareWalletAsync(strategyStr, ct);
 
         var newAddresses = await _addressPool.EnsureScanAddressesAsync(
             strategyStr,
-            settings,
-            descriptorRegistration,
-            descriptorRegisteredAt,
+            preparation.Settings,
+            preparation.DescriptorRegistration,
+            preparation.DescriptorRegisteredAt,
             startingIndex,
             gapLimit,
             ct);
