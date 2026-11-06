@@ -65,6 +65,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nuget-
 
+      - name: Build pinned Floresta node
+        run: docker compose -f docker-compose.integration.yml build floresta
+
       - name: Build plugin and tests
         run: >
           dotnet build BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj

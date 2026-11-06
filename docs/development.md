@@ -21,6 +21,20 @@ dotnet build BTCPayServer.Plugins.Floresta.csproj --no-dependencies
 
 ## Tests
 
+Integration tests and the trial deployment share the node build in
+`docker-compose.floresta.yml`. It pins Floresta to source commit
+`5698862813a6a810cc927227b1124547e9a0ad57` (2026-11-06), including the Electrum
+block-freshness and compact-filter rescan fixes. This is a development revision
+after v0.9.1, not a new upstream release. The previous integration image's build
+attestation identifies v0.9.1 commit `bc2db8d07e72651f9981ce589c5688f4d575dc7a`.
+
+The new revision has no upstream-published image, so the default builds from its
+full Git commit instead of using a registry digest. The image is tagged locally
+as `btcpay-floresta:5698862813a6`. CI explicitly builds it before running tests.
+The first build needs Rust compilation time and several GB of free disk space.
+`FLORESTA_REPO`, `FLORESTA_DOCKERFILE`, and `FLORESTA_IMAGE` still allow explicit
+overrides; an override is a different node target from the default tested here.
+
 Run unit tests:
 
 ```bash
@@ -48,6 +62,11 @@ dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Te
 
 docker compose -f docker-compose.integration.yml --profile full down -v
 ```
+
+The payment E2E also checks confirmed payments while Electrum clients keep
+polling, historical payment discovery after descriptor import and rescan, and
+descriptor persistence across a node restart. Floresta uses a disposable named
+volume so its data survives that restart; the cleanup command removes it.
 
 ## Local Floresta Development
 

@@ -1,0 +1,6 @@
+services:
+  floresta:
+    image: ${FLORESTA_IMAGE:-btcpay-floresta:5698862813a6}
+    build:
+      context: "${FLORESTA_REPO:-https://github.com/getfloresta/Floresta.git#5698862813a6a810cc927227b1124547e9a0ad57}"
+      dockerfile: ${FLORESTA_DOCKERFILE:-contrib/docker/Dockerfile}

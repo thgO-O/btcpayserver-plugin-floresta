@@ -10,6 +10,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Plugins.Floresta.Services;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Playwright;
 using NBitcoin;
 using NBitcoin.RPC;
@@ -70,7 +71,19 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
         var walletUrl = new Uri(_server.ServerUri, $"/wallets/S-{storeId}-BTC?loadTransactions=true").ToString();
 
-        var txId = await PayInvoiceAndWaitAsync(page, storeId, bitcoin, bitcoinWallet, "0.00100000", Money.Coins(0.001m));
+        var txId = await WithContinuousElectrumRequestsAsync(async () =>
+        {
+            var payment = await PayInvoiceAndWaitAsync(page, storeId, bitcoin, bitcoinWallet, "0.00100000", Money.Coins(0.001m));
+            await EventuallyAsync(async () =>
+            {
+                await using var connection = new NpgsqlConnection(GetE2ePostgresConnectionString());
+                await connection.OpenAsync();
+                Assert.Equal(1, await CountAsync(connection, "floresta.transactions",
+                    @"""WalletId"" = @walletId AND ""Txid"" = @txId AND ""BlockHeight"" > 0 AND ""RemovedAt"" IS NULL",
+                    strategy, payment.ToString()));
+            }, TimeSpan.FromSeconds(60), "payment confirmation while Electrum requests continue");
+            return payment;
+        });
         await AssertWalletTransactionVisibleAsync(page, walletUrl, txId, "0.00100000");
 
         await AssertWalletCacheCanBeRebuiltAsync(page, storeId, txId);
@@ -91,7 +104,12 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
             txId,
             postBtcpayRestartTxId);
 
+        // This descriptor is never given to BTCPay, so it cannot be re-registered
+        // by the plugin and conceal a node persistence failure after restart.
+        var historicalDescriptor = await AssertHistoricalPaymentRescanAsync(bitcoin, bitcoinWallet);
         await RestartFlorestaServiceAsync();
+        var descriptorsAfterRestart = await FlorestaRpcAsync("listdescriptors", Array.Empty<object>());
+        Assert.Contains(descriptorsAfterRestart.EnumerateArray(), item => item.GetString() == historicalDescriptor);
         await ConnectRegtestMeshAsync(bitcoin);
         await RefreshFlorestaUtreexoPeerAsync();
         await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
@@ -304,6 +322,91 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         {
             await FlorestaRpcAsync("ping", Array.Empty<object>());
         }, TimeSpan.FromSeconds(120), "Floresta RPC to recover after Docker restart");
+    }
+
+    private static FlorestaElectrumClient CreateElectrumClient()
+    {
+        var settings = new FlorestaSettings
+        {
+            ElectrumHost = Environment.GetEnvironmentVariable("FLORESTA_ELECTRUM_HOST") ?? "127.0.0.1",
+            ElectrumPort = int.TryParse(Environment.GetEnvironmentVariable("FLORESTA_ELECTRUM_PORT"), out var port) ? port : 20001,
+            ElectrumUseTls = bool.TryParse(Environment.GetEnvironmentVariable("FLORESTA_ELECTRUM_TLS"), out var tls) && tls
+        };
+        return new FlorestaElectrumClient(settings, NullLogger<FlorestaElectrumClient>.Instance);
+    }
+
+    private static async Task<T> WithContinuousElectrumRequestsAsync<T>(Func<Task<T>> action)
+    {
+        using var stop = new CancellationTokenSource();
+        var clients = Enumerable.Range(0, 4).Select(_ => CreateElectrumClient()).ToArray();
+        var requests = 0;
+        async Task PollAsync(FlorestaElectrumClient client)
+        {
+            try
+            {
+                while (!stop.IsCancellationRequested)
+                {
+                    await client.PingAsync(stop.Token);
+                    Interlocked.Increment(ref requests);
+                    await Task.Delay(100, stop.Token);
+                }
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested)
+            {
+            }
+        }
+
+        try
+        {
+            await Task.WhenAll(clients.Select(client => client.ConnectAsync(stop.Token)));
+            var pollers = clients.Select(PollAsync).ToArray();
+            try
+            {
+                var result = await action();
+                Assert.True(Volatile.Read(ref requests) >= 20, "Expected sustained Electrum polling during payment confirmation");
+                return result;
+            }
+            finally
+            {
+                stop.Cancel();
+                await Task.WhenAll(pollers);
+            }
+        }
+        finally
+        {
+            foreach (var client in clients)
+                await client.DisposeAsync();
+        }
+    }
+
+    private static async Task<string> AssertHistoricalPaymentRescanAsync(RPCClient bitcoin, RPCClient bitcoinWallet)
+    {
+        var key = new ExtKey().Neuter();
+        var descriptor = $"wpkh({key.GetWif(Network.RegTest)}/0/*)";
+        var address = key.Derive(new KeyPath("0/0")).PubKey.WitHash.GetAddress(Network.RegTest);
+        var txId = await bitcoinWallet.SendToAddressAsync(address, Money.Coins(0.0002m));
+        await bitcoinWallet.GenerateToAddressAsync(1, await bitcoinWallet.GetNewAddressAsync());
+        await SubmitBitcoinChainToUtreexodAsync(bitcoin);
+        await RefreshFlorestaUtreexoPeerAsync();
+        var height = await bitcoin.GetBlockCountAsync();
+        var bestBlock = await GetBitcoinBestBlockHashAsync(bitcoin);
+        await WaitForUtreexodChainAsync(height, bestBlock);
+        await WaitForFlorestaChainAsync(height, bestBlock);
+
+        // Import only after the payment was mined: its history must be recovered
+        // from existing block filters rather than a live wallet notification.
+        Assert.True((await FlorestaRpcAsync("loaddescriptor", new object[] { descriptor })).GetBoolean());
+        Assert.True((await FlorestaRpcAsync("rescanblockchain", new object[] { height - 1, height, false, "medium" })).GetBoolean());
+        await using var electrum = CreateElectrumClient();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        await electrum.ConnectAsync(timeout.Token);
+        var scriptHash = ScriptHashUtility.ComputeScriptHash(address.ScriptPubKey);
+        await EventuallyAsync(async () =>
+        {
+            var history = await electrum.ScripthashGetHistoryAsync(scriptHash, timeout.Token);
+            Assert.Contains(history, item => item.TxHash == txId.ToString() && item.Height == height);
+        }, TimeSpan.FromSeconds(60), "historical payment to be discovered by the node rescan");
+        return descriptor;
     }
 
     private static string GetRepoRoot()
