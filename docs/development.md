@@ -64,12 +64,18 @@ docker compose -f docker-compose.integration.yml --profile full down -v
 ```
 
 The payment E2E also checks confirmed payments while Electrum clients keep
-polling, historical payment discovery after descriptor import and rescan, and
-descriptor persistence across a node restart. Floresta uses a disposable named
-volume so its data survives that restart; the cleanup command removes it.
+polling, historical payment discovery separately through descriptor import and
+explicit rescan, and descriptor persistence across a node restart. It mines a
+payment at descriptor index120 before another at index80, in separate blocks.
+Import finds index80 and expands the node's initial 100-address horizon; the
+older index120 payment must remain absent until the explicit rescan recovers it.
+An RPC that reports success without scanning therefore cannot satisfy the test.
+This exercises the node directly and does not change the plugin's address cap.
+Floresta uses a disposable named volume so its data survives that restart; the
+cleanup command removes it.
 The fixture enables `utreexod --cfilters` and checks that Floresta has a
 compact-filter peer, which is required for historical rescans. The historical
-payment is mined before the wallet flow and imported later, after the peers
+payments are mined before the wallet flow and imported later, after the peers
 have had time to exchange its filters.
 
 ## Local Floresta Development

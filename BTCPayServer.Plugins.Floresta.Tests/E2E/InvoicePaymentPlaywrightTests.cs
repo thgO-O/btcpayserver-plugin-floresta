@@ -60,7 +60,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await WaitForUtreexodChainAsync(chainHeight, bestBlockHash);
         await WaitForFlorestaChainAsync(chainHeight, bestBlockHash);
         await WaitForBtcpayFlorestaBackendAsync(page, chainHeight);
-        var historicalPayment = await CreateHistoricalPaymentAsync(bitcoin, bitcoinWallet);
+        var historicalPayments = await CreateHistoricalPaymentsAsync(bitcoin, bitcoinWallet);
 
         var storeId = await CreateStore(page);
         await ConfigureStoreToSettleUnconfirmed(page, storeId);
@@ -107,7 +107,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
         // This descriptor is never given to BTCPay, so it cannot be re-registered
         // by the plugin and conceal a node persistence failure after restart.
-        var historicalDescriptor = await AssertHistoricalPaymentRescanAsync(historicalPayment);
+        var historicalDescriptor = await AssertHistoricalPaymentRescanAsync(historicalPayments.ImportPayment, historicalPayments.RescanPayment);
         await RestartFlorestaServiceAsync();
         var descriptorsAfterRestart = await FlorestaRpcAsync("listdescriptors", Array.Empty<object>());
         Assert.Contains(descriptorsAfterRestart.EnumerateArray(), item => item.GetString() == historicalDescriptor);
@@ -380,40 +380,59 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         }
     }
 
-    private static async Task<HistoricalPayment> CreateHistoricalPaymentAsync(RPCClient bitcoin, RPCClient bitcoinWallet)
+    private static async Task<(HistoricalPayment ImportPayment, HistoricalPayment RescanPayment)> CreateHistoricalPaymentsAsync(RPCClient bitcoin, RPCClient bitcoinWallet)
     {
         var key = new ExtKey().Neuter();
         var descriptor = $"wpkh({key.GetWif(Network.RegTest)}/0/*)";
-        var address = key.Derive(new KeyPath("0/0")).PubKey.WitHash.GetAddress(Network.RegTest);
-        var txId = await bitcoinWallet.SendToAddressAsync(address, Money.Coins(0.0002m));
-        await bitcoinWallet.GenerateToAddressAsync(1, await bitcoinWallet.GetNewAddressAsync());
-        await SubmitBitcoinChainToUtreexodAsync(bitcoin);
-        await RefreshFlorestaUtreexoPeerAsync();
-        var height = await bitcoin.GetBlockCountAsync();
-        var bestBlock = await GetBitcoinBestBlockHashAsync(bitcoin);
-        await WaitForUtreexodChainAsync(height, bestBlock);
-        await WaitForFlorestaChainAsync(height, bestBlock);
 
-        return new HistoricalPayment(descriptor, ScriptHashUtility.ComputeScriptHash(address.ScriptPubKey), txId, height);
+        async Task<HistoricalPayment> PayAndMineAsync(uint index)
+        {
+            var address = key.Derive(new KeyPath($"0/{index}")).PubKey.WitHash.GetAddress(Network.RegTest);
+            var txId = await bitcoinWallet.SendToAddressAsync(address, Money.Coins(0.0002m));
+            await bitcoinWallet.GenerateToAddressAsync(1, await bitcoinWallet.GetNewAddressAsync());
+            await SubmitBitcoinChainToUtreexodAsync(bitcoin);
+            await RefreshFlorestaUtreexoPeerAsync();
+            var height = await bitcoin.GetBlockCountAsync();
+            var bestBlock = await GetBitcoinBestBlockHashAsync(bitcoin);
+            await WaitForUtreexodChainAsync(height, bestBlock);
+            await WaitForFlorestaChainAsync(height, bestBlock);
+
+            return new HistoricalPayment(descriptor, ScriptHashUtility.ComputeScriptHash(address.ScriptPubKey), txId, height);
+        }
+
+        // The node initially derives 0..99. Mine index120 before index80, in a
+        // separate block, so import's scan cannot recover it after index80
+        // triggers derivation through index199.
+        var rescanPayment = await PayAndMineAsync(120);
+        var importPayment = await PayAndMineAsync(80);
+        return (importPayment, rescanPayment);
     }
 
-    private static async Task<string> AssertHistoricalPaymentRescanAsync(HistoricalPayment payment)
+    private static async Task<string> AssertHistoricalPaymentRescanAsync(HistoricalPayment importPayment, HistoricalPayment rescanPayment)
     {
         await using var electrum = CreateElectrumClient();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(150));
         await electrum.ConnectAsync(timeout.Token);
-        Assert.Empty(await electrum.ScripthashGetHistoryAsync(payment.ScriptHash, timeout.Token));
+        Assert.Empty(await electrum.ScripthashGetHistoryAsync(importPayment.ScriptHash, timeout.Token));
+        Assert.Empty(await electrum.ScripthashGetHistoryAsync(rescanPayment.ScriptHash, timeout.Token));
 
-        // Import only after the payment was mined: its history must be recovered
-        // from existing block filters rather than a live wallet notification.
-        Assert.True((await FlorestaRpcAsync("loaddescriptor", new object[] { payment.Descriptor })).GetBoolean());
-        Assert.True((await FlorestaRpcAsync("rescanblockchain", new object[] { payment.Height - 1, payment.Height, false, "medium" })).GetBoolean());
+        // Import's automatic scan finds index80 and expands the horizon. The
+        // older index120 payment must still be absent when that scan finishes.
+        Assert.True((await FlorestaRpcAsync("loaddescriptor", new object[] { importPayment.Descriptor })).GetBoolean());
         await EventuallyAsync(async () =>
         {
-            var history = await electrum.ScripthashGetHistoryAsync(payment.ScriptHash, timeout.Token);
-            Assert.Contains(history, item => item.TxHash == payment.TxId.ToString() && item.Height == payment.Height);
-        }, TimeSpan.FromSeconds(60), "historical payment to be discovered by the node rescan");
-        return payment.Descriptor;
+            var history = await electrum.ScripthashGetHistoryAsync(importPayment.ScriptHash, timeout.Token);
+            Assert.Contains(history, item => item.TxHash == importPayment.TxId.ToString() && item.Height == importPayment.Height);
+        }, TimeSpan.FromSeconds(60), "historical payment to be discovered by descriptor import");
+        Assert.Empty(await electrum.ScripthashGetHistoryAsync(rescanPayment.ScriptHash, timeout.Token));
+
+        Assert.True((await FlorestaRpcAsync("rescanblockchain", new object[] { rescanPayment.Height - 1, rescanPayment.Height, false, "medium" })).GetBoolean());
+        await EventuallyAsync(async () =>
+        {
+            var history = await electrum.ScripthashGetHistoryAsync(rescanPayment.ScriptHash, timeout.Token);
+            Assert.Contains(history, item => item.TxHash == rescanPayment.TxId.ToString() && item.Height == rescanPayment.Height);
+        }, TimeSpan.FromSeconds(60), "historical payment to be discovered only by explicit rescan");
+        return importPayment.Descriptor;
     }
 
     private static string GetRepoRoot()
