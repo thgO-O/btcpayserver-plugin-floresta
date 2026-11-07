@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -119,6 +120,13 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         var postFlorestaRestartTxId = await PayInvoiceAndWaitAsync(page, storeId, bitcoin, bitcoinWallet, "0.00060000", Money.Coins(0.0006m));
         await AssertWalletTransactionVisibleAsync(page, walletUrl, postFlorestaRestartTxId, "0.00060000");
         await AssertKnownPaymentsRemainActiveAsync(strategy, txId, postBtcpayRestartTxId, postFlorestaRestartTxId);
+
+        await AssertNodeDataLossRecoveryAsync(bitcoin, strategy, historicalDescriptor,
+            txId, postBtcpayRestartTxId, postFlorestaRestartTxId);
+        await WaitForBtcpayFlorestaBackendAsync(page, await bitcoin.GetBlockCountAsync());
+        var postDataResetTxId = await PayInvoiceAndWaitAsync(page, storeId, bitcoin, bitcoinWallet, "0.00050000", Money.Coins(0.0005m));
+        await AssertWalletTransactionVisibleAsync(page, walletUrl, postDataResetTxId, "0.00050000");
+        await AssertKnownPaymentsRemainActiveAsync(strategy, txId, postBtcpayRestartTxId, postFlorestaRestartTxId, postDataResetTxId);
 
         var spendTxId = await SpendFromBtcpayWalletWithSeed(page, storeId, bitcoinWallet);
         await WaitForBitcoinMempoolAsync(bitcoin, spendTxId);
@@ -319,10 +327,116 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
             "floresta");
         Assert.NotNull(output);
 
+        await WaitForFlorestaRpcAsync();
+    }
+
+    private static async Task WaitForFlorestaRpcAsync()
+    {
         await EventuallyAsync(async () =>
         {
             await FlorestaRpcAsync("ping", Array.Empty<object>());
         }, TimeSpan.FromSeconds(120), "Floresta RPC to recover after Docker restart");
+    }
+
+    private static async Task ResetFlorestaDataAsync()
+    {
+        var composeFile = Path.Combine(GetRepoRoot(), "docker-compose.integration.yml");
+        var containerId = Assert.IsType<string>(RunProcess("docker", "compose", "-f", composeFile, "ps", "-q", "floresta"));
+        Assert.False(string.IsNullOrWhiteSpace(containerId));
+        var inspect = RunProcess("docker", "inspect", containerId.Trim());
+        Assert.NotNull(inspect);
+        using var info = JsonDocument.Parse(inspect);
+        var container = info.RootElement[0];
+        var labels = container.GetProperty("Config").GetProperty("Labels");
+        Assert.Equal("floresta", labels.GetProperty("com.docker.compose.service").GetString());
+        Assert.Contains(composeFile, labels.GetProperty("com.docker.compose.project.config_files").GetString()!.Split(','));
+        Assert.Contains(container.GetProperty("Mounts").EnumerateArray(), mount =>
+            mount.GetProperty("Type").GetString() == "volume" && mount.GetProperty("Destination").GetString() == "/data");
+
+        var command = container.GetProperty("Config").GetProperty("Cmd").EnumerateArray()
+            .Select(item => item.GetString()!).ToArray();
+        var networkIndex = Array.IndexOf(command, "--network");
+        Assert.InRange(networkIndex, 0, command.Length - 2);
+        Assert.Equal("regtest", command[networkIndex + 1]);
+        var dataIndex = Array.IndexOf(command, "--data-dir");
+        Assert.InRange(dataIndex, 0, command.Length - 2);
+        Assert.Equal("/data", command[dataIndex + 1]);
+
+        // Give only the disposable regtest node a fresh datadir. The old state
+        // stays in the same test volume until the normal down --volumes cleanup.
+        command[dataIndex + 1] = $"/data/reset-{Guid.NewGuid():N}";
+        var overrideFile = Path.Combine(Path.GetTempPath(), $"floresta-regtest-reset-{Guid.NewGuid():N}.json");
+        try
+        {
+            await File.WriteAllTextAsync(overrideFile, JsonSerializer.Serialize(new
+            {
+                services = new { floresta = new { command } }
+            }));
+            var output = RunProcess(TimeSpan.FromSeconds(60), "docker", "compose", "-f", composeFile,
+                "-f", overrideFile, "up", "--no-build", "--no-deps", "--force-recreate", "-d", "floresta");
+            Assert.NotNull(output);
+            await WaitForFlorestaRpcAsync();
+        }
+        finally
+        {
+            File.Delete(overrideFile);
+        }
+    }
+
+    private async Task AssertNodeDataLossRecoveryAsync(RPCClient bitcoin, string strategy, string externalDescriptor, params uint256[] txIds)
+    {
+        var txHashes = txIds.Select(txId => txId.ToString()).ToArray();
+        var payments = new List<(string ScriptHash, string TxId)>();
+        string[] descriptors;
+        await using (var connection = new NpgsqlConnection(GetE2ePostgresConnectionString()))
+        {
+            await connection.OpenAsync();
+            await using var walletCommand = new NpgsqlCommand("""
+                SELECT ARRAY["ReceiveDescriptor", "ChangeDescriptor"]
+                FROM floresta.tracked_wallets WHERE "Id" = @walletId
+                """, connection);
+            walletCommand.Parameters.AddWithValue("walletId", strategy);
+            descriptors = Assert.IsType<string[]>(await walletCommand.ExecuteScalarAsync());
+            Assert.All(descriptors, descriptor => Assert.False(string.IsNullOrWhiteSpace(descriptor)));
+
+            await using var paymentCommand = new NpgsqlCommand("""
+                SELECT DISTINCT "Scripthash", "Txid" FROM floresta.utxos
+                WHERE "WalletId" = @walletId AND "Txid" = ANY(@txIds)
+                """, connection);
+            paymentCommand.Parameters.AddWithValue("walletId", strategy);
+            paymentCommand.Parameters.AddWithValue("txIds", txHashes);
+            await using var reader = await paymentCommand.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                payments.Add((reader.GetString(0), reader.GetString(1)));
+        }
+        Assert.All(txHashes, txId => Assert.Contains(payments, payment => payment.TxId == txId));
+
+        await ResetFlorestaDataAsync();
+        var afterReset = await FlorestaRpcAsync("listdescriptors", Array.Empty<object>());
+        Assert.DoesNotContain(afterReset.EnumerateArray(), descriptor => descriptor.GetString() == externalDescriptor);
+        await ConnectRegtestMeshAsync(bitcoin);
+        await RefreshFlorestaUtreexoPeerAsync();
+        await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
+
+        // Observe automatic recovery before another invoice or manual scan can
+        // repair missing registrations on the plugin's behalf.
+        await EventuallyAsync(async () =>
+        {
+            var restored = await FlorestaRpcAsync("listdescriptors", Array.Empty<object>());
+            Assert.All(descriptors, expected => Assert.Contains(restored.EnumerateArray(), item => item.GetString() == expected));
+        }, TimeSpan.FromSeconds(120), "node descriptors to be restored after data reset");
+        await using var electrum = CreateElectrumClient();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        await electrum.ConnectAsync(timeout.Token);
+        await EventuallyAsync(async () =>
+        {
+            foreach (var payment in payments)
+            {
+                var history = await electrum.ScripthashGetHistoryAsync(payment.ScriptHash, timeout.Token);
+                Assert.Contains(history, item => item.TxHash == payment.TxId && item.Height > 0);
+            }
+        }, TimeSpan.FromSeconds(90), "known payment history to recover after node data reset");
+        await AssertKnownPaymentsRemainActiveAsync(strategy, txIds);
     }
 
     private static FlorestaElectrumClient CreateElectrumClient()

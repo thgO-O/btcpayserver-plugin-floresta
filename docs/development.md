@@ -73,6 +73,12 @@ An RPC that reports success without scanning therefore cannot satisfy the test.
 This exercises the node directly and does not change the plugin's address cap.
 Floresta uses a disposable named volume so its data survives that restart; the
 cleanup command removes it.
+After checking persistence, the E2E recreates only the regtest node with a fresh
+datadir inside that disposable volume. It retains the plugin database and peers,
+requires automatic descriptor and historical payment recovery before creating
+another invoice or starting a manual scan, then checks a new payment and spend.
+The external descriptor must disappear after this reset, proving that retained
+node history cannot conceal a recovery failure.
 The fixture enables `utreexod --cfilters` and checks that Floresta has a
 compact-filter peer, which is required for historical rescans. The historical
 payments are mined before the wallet flow and imported later, after the peers
