@@ -67,6 +67,10 @@ The payment E2E also checks confirmed payments while Electrum clients keep
 polling, historical payment discovery after descriptor import and rescan, and
 descriptor persistence across a node restart. Floresta uses a disposable named
 volume so its data survives that restart; the cleanup command removes it.
+The fixture enables `utreexod --cfilters` and checks that Floresta has a
+compact-filter peer, which is required for historical rescans. The historical
+payment is mined before the wallet flow and imported later, after the peers
+have had time to exchange its filters.
 
 ## Local Floresta Development
 

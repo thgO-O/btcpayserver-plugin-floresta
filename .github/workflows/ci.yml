@@ -133,6 +133,10 @@ jobs:
           -p:EnableNETAnalyzers=false
           -nr:false
 
+      - name: Show regtest logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.integration.yml --profile full logs --no-color --tail 200
+
       - name: Cleanup Playwright E2E stack
         if: always()
         run: docker compose -f docker-compose.integration.yml --profile full down --volumes --remove-orphans

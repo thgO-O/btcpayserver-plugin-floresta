@@ -123,6 +123,7 @@ services:
       - --rpclisten=0.0.0.0:38332
       - --listen=0.0.0.0:38333
       - --utreexoproofindex
+      - --cfilters
       - --prune=0
     expose:
       - "38332"

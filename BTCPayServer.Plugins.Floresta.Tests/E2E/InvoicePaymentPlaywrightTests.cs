@@ -60,6 +60,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await WaitForUtreexodChainAsync(chainHeight, bestBlockHash);
         await WaitForFlorestaChainAsync(chainHeight, bestBlockHash);
         await WaitForBtcpayFlorestaBackendAsync(page, chainHeight);
+        var historicalPayment = await CreateHistoricalPaymentAsync(bitcoin, bitcoinWallet);
 
         var storeId = await CreateStore(page);
         await ConfigureStoreToSettleUnconfirmed(page, storeId);
@@ -106,7 +107,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
         // This descriptor is never given to BTCPay, so it cannot be re-registered
         // by the plugin and conceal a node persistence failure after restart.
-        var historicalDescriptor = await AssertHistoricalPaymentRescanAsync(bitcoin, bitcoinWallet);
+        var historicalDescriptor = await AssertHistoricalPaymentRescanAsync(historicalPayment);
         await RestartFlorestaServiceAsync();
         var descriptorsAfterRestart = await FlorestaRpcAsync("listdescriptors", Array.Empty<object>());
         Assert.Contains(descriptorsAfterRestart.EnumerateArray(), item => item.GetString() == historicalDescriptor);
@@ -379,7 +380,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         }
     }
 
-    private static async Task<string> AssertHistoricalPaymentRescanAsync(RPCClient bitcoin, RPCClient bitcoinWallet)
+    private static async Task<HistoricalPayment> CreateHistoricalPaymentAsync(RPCClient bitcoin, RPCClient bitcoinWallet)
     {
         var key = new ExtKey().Neuter();
         var descriptor = $"wpkh({key.GetWif(Network.RegTest)}/0/*)";
@@ -393,20 +394,26 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await WaitForUtreexodChainAsync(height, bestBlock);
         await WaitForFlorestaChainAsync(height, bestBlock);
 
-        // Import only after the payment was mined: its history must be recovered
-        // from existing block filters rather than a live wallet notification.
-        Assert.True((await FlorestaRpcAsync("loaddescriptor", new object[] { descriptor })).GetBoolean());
-        Assert.True((await FlorestaRpcAsync("rescanblockchain", new object[] { height - 1, height, false, "medium" })).GetBoolean());
+        return new HistoricalPayment(descriptor, ScriptHashUtility.ComputeScriptHash(address.ScriptPubKey), txId, height);
+    }
+
+    private static async Task<string> AssertHistoricalPaymentRescanAsync(HistoricalPayment payment)
+    {
         await using var electrum = CreateElectrumClient();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         await electrum.ConnectAsync(timeout.Token);
-        var scriptHash = ScriptHashUtility.ComputeScriptHash(address.ScriptPubKey);
+        Assert.Empty(await electrum.ScripthashGetHistoryAsync(payment.ScriptHash, timeout.Token));
+
+        // Import only after the payment was mined: its history must be recovered
+        // from existing block filters rather than a live wallet notification.
+        Assert.True((await FlorestaRpcAsync("loaddescriptor", new object[] { payment.Descriptor })).GetBoolean());
+        Assert.True((await FlorestaRpcAsync("rescanblockchain", new object[] { payment.Height - 1, payment.Height, false, "medium" })).GetBoolean());
         await EventuallyAsync(async () =>
         {
-            var history = await electrum.ScripthashGetHistoryAsync(scriptHash, timeout.Token);
-            Assert.Contains(history, item => item.TxHash == txId.ToString() && item.Height == height);
+            var history = await electrum.ScripthashGetHistoryAsync(payment.ScriptHash, timeout.Token);
+            Assert.Contains(history, item => item.TxHash == payment.TxId.ToString() && item.Height == payment.Height);
         }, TimeSpan.FromSeconds(60), "historical payment to be discovered by the node rescan");
-        return descriptor;
+        return payment.Descriptor;
     }
 
     private static string GetRepoRoot()
@@ -461,6 +468,10 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
                 "Expected Floresta to be connected to bitcoind");
             Assert.True(florestaPeers.EnumerateArray().Any(peer => PeerMatches(peer, "address", utreexodEndpoint) || PeerMatches(peer, "user_agent", "utreexo")),
                 "Expected Floresta to be connected to utreexod");
+            Assert.True(florestaPeers.EnumerateArray().Any(peer =>
+                    peer.TryGetProperty("servicesnames", out var services) &&
+                    services.EnumerateArray().Any(service => service.GetString() == "COMPACT_FILTERS")),
+                "Expected a compact-filter peer for the historical rescan (utreexod --cfilters)");
 
             var bitcoindPeers = await BitcoinRpcJsonAsync(bitcoin, "getpeerinfo");
             Assert.True(bitcoindPeers.EnumerateArray().Any(peer => PeerMatches(peer, "addr", utreexodEndpoint) || PeerMatches(peer, "subver", "utreexo")),
@@ -1288,6 +1299,8 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
         throw new TimeoutException($"Timed out waiting for {description}. Last error: {lastError?.Message}", lastError);
     }
+
+    private sealed record HistoricalPayment(string Descriptor, string ScriptHash, uint256 TxId, int Height);
 
     private sealed record WalletCacheSnapshot(
         int ReceiveGapIndex,
