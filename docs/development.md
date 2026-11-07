@@ -79,6 +79,10 @@ requires automatic descriptor and historical payment recovery before creating
 another invoice or starting a manual scan, then checks a new payment and spend.
 The external descriptor must disappear after this reset, proving that retained
 node history cannot conceal a recovery failure.
+This scenario waits for automatic descriptor registration before reconnecting
+the regtest peers, then checks historical recovery during chain replay. It does
+not cover the separate case where replay finishes before registration: a rescan
+rejected during IBD is currently not retried automatically.
 The fixture enables `utreexod --cfilters` and checks that Floresta has a
 compact-filter peer, which is required for historical rescans. The historical
 payments are mined before the wallet flow and imported later, after the peers

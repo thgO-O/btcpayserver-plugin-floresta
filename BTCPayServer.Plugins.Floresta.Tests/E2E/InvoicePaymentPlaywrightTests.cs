@@ -414,17 +414,18 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await ResetFlorestaDataAsync();
         var afterReset = await FlorestaRpcAsync("listdescriptors", Array.Empty<object>());
         Assert.DoesNotContain(afterReset.EnumerateArray(), descriptor => descriptor.GetString() == externalDescriptor);
-        await ConnectRegtestMeshAsync(bitcoin);
-        await RefreshFlorestaUtreexoPeerAsync();
-        await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
 
         // Observe automatic recovery before another invoice or manual scan can
-        // repair missing registrations on the plugin's behalf.
+        // repair missing registrations on the plugin's behalf. Attach peers only
+        // after registration so replay cannot race the plugin's reconnect.
         await EventuallyAsync(async () =>
         {
             var restored = await FlorestaRpcAsync("listdescriptors", Array.Empty<object>());
             Assert.All(descriptors, expected => Assert.Contains(restored.EnumerateArray(), item => item.GetString() == expected));
         }, TimeSpan.FromSeconds(120), "node descriptors to be restored after data reset");
+        await ConnectRegtestMeshAsync(bitcoin);
+        await RefreshFlorestaUtreexoPeerAsync();
+        await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
         await using var electrum = CreateElectrumClient();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
         await electrum.ConnectAsync(timeout.Token);
