@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Models;
 using BTCPayServer.Plugins.Floresta.Data;
+using BTCPayServer.Plugins.Floresta.Services;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NBXplorer.DerivationStrategy;
@@ -34,10 +35,24 @@ public class FlorestaWalletSyncReadinessTests
         {
             var result = await sync.SyncWalletStateForScanAsync("wallet", Addresses(), CancellationToken.None, (_, _) => { });
             Assert.Empty(result.NewTransactions);
+            Assert.True(result.Deferred);
             Assert.False(result.Summary.IsComplete);
             Assert.Equal(0, result.Summary.Attempted);
         }
 
+        Assert.Equal(0, database.Accesses);
+    }
+
+    [Fact]
+    public async Task DeferredWalletStillRequiresReconciliationWhenTheFinalStatusIsReady()
+    {
+        using var http = new HttpClient(new RpcHandler(_ => Task.FromResult(InfoResponse(true))));
+        var (sync, database) = CreateSync(http);
+        var deferred = await sync.SyncWalletStateWithResultAsync("wallet", Addresses(), CancellationToken.None);
+
+        // The node leaves IBD after the wallet RPC, before the listener's final
+        // refresh. Ready status alone must not acknowledge the deferred work.
+        Assert.False(FlorestaListener.CanCompleteInitialization(deferred.Deferred, true, false, 1, 1));
         Assert.Equal(0, database.Accesses);
     }
 
@@ -65,7 +80,10 @@ public class FlorestaWalletSyncReadinessTests
         })));
         var (sync, database) = CreateSync(http);
 
-        await Assert.ThrowsAsync<FlorestaRpcException>(() => InvokeAsync(sync, blockNotification, CancellationToken.None));
+        if (blockNotification)
+            await Assert.ThrowsAsync<FlorestaRpcException>(() => InvokeAsync(sync, true, CancellationToken.None));
+        else
+            Assert.True((await sync.SyncWalletStateWithResultAsync("wallet", Addresses(), CancellationToken.None)).Deferred);
 
         Assert.Equal(0, database.Accesses);
     }

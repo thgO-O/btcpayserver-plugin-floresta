@@ -83,8 +83,13 @@ An observer in the disposable test database records any removal, deletion or
 spent-state transition of the known payments throughout this reset and recovery.
 Replay cannot hide a temporary loss by restoring the final cache state.
 Wallet cache reconciliation is deferred while the node reports IBD. The listener
-retains the previously known wallet height and retries initialization through
-its existing loop once the node is ready. An Electrum connection change during
+retains the previously known wallet height and tracks whether wallet reconciliation
+was deferred, even if the node becomes ready during initialization. Successful
+preparation is reused during IBD for the same connection and preparation settings;
+new wallets, failed preparation and changed settings are checked on later passes.
+The existing loop
+reconciles again once ready before marking initialization complete. Failed
+preparation is retried. An Electrum connection change during
 the check or address reads also invalidates that synchronization attempt.
 After recovery, the final spend verifies that genuinely spent outputs are still
 reconciled normally.

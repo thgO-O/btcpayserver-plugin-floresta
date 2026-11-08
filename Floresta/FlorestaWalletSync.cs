@@ -26,7 +26,8 @@ internal sealed class FlorestaWalletSync
 
     internal sealed record WalletSyncResult(
         List<FlorestaWalletTracker.NewTransactionInfo> NewTransactions,
-        WalletAddressSyncSummary Summary);
+        WalletAddressSyncSummary Summary,
+        bool Deferred = false);
 
     private readonly FlorestaDbContextFactory _dbFactory;
     private readonly FlorestaElectrumClient _client;
@@ -106,11 +107,11 @@ internal sealed class FlorestaWalletSync
         return SyncWalletStateWithResultAsync(walletId, addresses, ct, reportProgress);
     }
 
-    private async Task<WalletSyncResult> SyncWalletStateWithResultAsync(
+    internal async Task<WalletSyncResult> SyncWalletStateWithResultAsync(
         string walletId,
         List<TrackedAddress> addresses,
         CancellationToken ct,
-        Action<int, int> reportProgress)
+        Action<int, int> reportProgress = null)
     {
         var walletLock = GetWalletLock(walletId);
         await walletLock.WaitAsync(ct);
@@ -238,11 +239,25 @@ internal sealed class FlorestaWalletSync
         Action<int, int> reportProgress)
     {
         var connectionGeneration = _client.ConnectionGeneration;
-        if (await IsNodeInInitialBlockDownloadAsync(ct))
+        bool isInitialBlockDownload;
+        try
+        {
+            isInitialBlockDownload = await IsNodeInInitialBlockDownloadAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Wallet synchronization deferred because node readiness could not be checked");
+            isInitialBlockDownload = true;
+        }
+        if (isInitialBlockDownload)
         {
             // A successful response from an incomplete node is not evidence
             // that a cached transaction or output has disappeared.
-            return new(new(), new WalletAddressSyncSummary(0, 0, addresses.Count));
+            return new(new(), new WalletAddressSyncSummary(0, 0, addresses.Count), Deferred: true);
         }
         EnsureConnectionGeneration(connectionGeneration);
 

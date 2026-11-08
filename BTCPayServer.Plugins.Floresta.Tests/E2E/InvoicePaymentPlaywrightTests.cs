@@ -144,12 +144,15 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
             await using var connection = new NpgsqlConnection(GetE2ePostgresConnectionString());
             await connection.OpenAsync();
             await using var command = new NpgsqlCommand("""
-                SELECT bool_and("IsSpent") FROM floresta.utxos
+                SELECT count(*), count(*) FILTER (WHERE "IsSpent") FROM floresta.utxos
                 WHERE "WalletId" = @walletId AND "Outpoint" = ANY(@outpoints)
                 """, connection);
             command.Parameters.AddWithValue("walletId", strategy);
             command.Parameters.AddWithValue("outpoints", spentOutpoints);
-            Assert.True(Assert.IsType<bool>(await command.ExecuteScalarAsync()));
+            await using var reader = await command.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(spentOutpoints.Length, reader.GetInt64(0));
+            Assert.Equal(spentOutpoints.Length, reader.GetInt64(1));
         }, TimeSpan.FromSeconds(60), "spent outputs to be reconciled after the node has recovered");
     }
 
@@ -424,6 +427,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
                 payments.Add((reader.GetString(0), reader.GetString(1)));
         }
         Assert.All(txHashes, txId => Assert.Contains(payments, payment => payment.TxId == txId));
+        var beforeReset = await ReadWalletCacheSnapshotAsync(strategy, txHashes[0]);
 
         await using var cacheObserver = await WalletCacheTransitionObserver.StartAsync(
             GetE2ePostgresConnectionString(), strategy, txHashes);
@@ -465,6 +469,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
             }
         }, TimeSpan.FromSeconds(90), "known payment history to recover after node data reset");
         await AssertKnownPaymentsRemainActiveAsync(strategy, txIds);
+        AssertAddressStatePreserved(beforeReset, await ReadWalletCacheSnapshotAsync(strategy, txHashes[0]));
         await cacheObserver.AssertNoTransitionsAsync();
     }
 
@@ -1174,16 +1179,21 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
     private static void AssertWalletShapePreserved(WalletCacheSnapshot expected, WalletCacheSnapshot actual)
     {
-        Assert.Equal(expected.AddressCount, actual.AddressCount);
-        Assert.Equal(expected.ReservedAddressCount, actual.ReservedAddressCount);
-        Assert.Equal(expected.UsedAddressCount, actual.UsedAddressCount);
-        Assert.Equal(expected.ReceiveGapIndex, actual.ReceiveGapIndex);
-        Assert.Equal(expected.ChangeGapIndex, actual.ChangeGapIndex);
+        AssertAddressStatePreserved(expected, actual);
         Assert.Equal(expected.DescriptorStatus, actual.DescriptorStatus);
         Assert.Equal(expected.RescanStatus, actual.RescanStatus);
         Assert.Equal(expected.HasRescanRequestedAt, actual.HasRescanRequestedAt);
         Assert.Equal(expected.RescanStartHeight, actual.RescanStartHeight);
         Assert.Equal(expected.RescanError, actual.RescanError);
+    }
+
+    private static void AssertAddressStatePreserved(WalletCacheSnapshot expected, WalletCacheSnapshot actual)
+    {
+        Assert.Equal(expected.AddressCount, actual.AddressCount);
+        Assert.Equal(expected.ReservedAddressCount, actual.ReservedAddressCount);
+        Assert.Equal(expected.UsedAddressCount, actual.UsedAddressCount);
+        Assert.Equal(expected.ReceiveGapIndex, actual.ReceiveGapIndex);
+        Assert.Equal(expected.ChangeGapIndex, actual.ChangeGapIndex);
     }
 
     private async Task WipeWalletCacheAsync(IPage page, string walletRouteId)

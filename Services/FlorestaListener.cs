@@ -148,7 +148,7 @@ public class FlorestaListener : IHostedService
         }
     }
 
-    private async Task<int?> InitializeListenerAsync(CancellationToken ct)
+    internal async Task<int?> InitializeListenerAsync(CancellationToken ct)
     {
         await _initializationLock.WaitAsync(ct);
         try
@@ -165,12 +165,17 @@ public class FlorestaListener : IHostedService
                 return null;
             }
 
-            await _tracker.InitializeAsync(ct);
+            var connectionGeneration = _electrumClient.ConnectionGeneration;
+            _listenerInitialized = false;
+            var synchronizationDeferred = await _tracker.InitializeAsync(ct,
+                _statusMonitor.IsInitialBlockDownload == true);
 
             var header = await _electrumClient.HeadersSubscribeAsync(ct);
             _statusMonitor.SetTipHeight(header.Height);
             await _statusMonitor.RefreshAsync(ct);
-            if (!_statusMonitor.IsNetworkCompatible || _statusMonitor.IsInitialBlockDownload == true)
+            if (!CanCompleteInitialization(synchronizationDeferred,
+                    _statusMonitor.IsNetworkCompatible, _statusMonitor.IsInitialBlockDownload,
+                    connectionGeneration, _electrumClient.ConnectionGeneration))
             {
                 _listenerInitialized = false;
                 return null;
@@ -179,7 +184,7 @@ public class FlorestaListener : IHostedService
             var initializedHeight = _statusMonitor.ValidatedHeight ?? header.Height;
             _tracker.SetTipHeight(initializedHeight);
             _listenerInitialized = true;
-            _initializedConnectionGeneration = _electrumClient.ConnectionGeneration;
+            _initializedConnectionGeneration = connectionGeneration;
             _logger.LogInformation("Electrum listener initialized, tip height: {Height}", initializedHeight);
             return initializedHeight;
         }
@@ -187,6 +192,13 @@ public class FlorestaListener : IHostedService
         {
             _initializationLock.Release();
         }
+    }
+
+    internal static bool CanCompleteInitialization(bool synchronizationDeferred, bool isNetworkCompatible,
+        bool? isInitialBlockDownload, long startedGeneration, long currentGeneration)
+    {
+        return !synchronizationDeferred && isNetworkCompatible && isInitialBlockDownload != true &&
+               startedGeneration == currentGeneration;
     }
 
     private void OnScripthashNotification(string scripthash, string status)
