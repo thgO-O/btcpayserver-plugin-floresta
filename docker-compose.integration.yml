@@ -2,7 +2,9 @@ name: btcpay-floresta-plugin-integration
 
 services:
   floresta:
-    image: ${FLORESTA_IMAGE:-dlsz/floresta@sha256:f242ca3d6a765d9f61f141363d710a999392cc0d6db6ade8052a70da936abd6a}
+    extends:
+      file: docker-compose.floresta.yml
+      service: floresta
     platform: ${FLORESTA_PLATFORM:-linux/amd64}
     command:
       - florestad
@@ -23,8 +25,8 @@ services:
     ports:
       - "${FLORESTA_RPC_BIND:-127.0.0.1}:${FLORESTA_RPC_PORT:-18442}:18442"
       - "${FLORESTA_ELECTRUM_BIND:-127.0.0.1}:${FLORESTA_ELECTRUM_PORT_HOST:-20001}:20001"
-    tmpfs:
-      - /data
+    volumes:
+      - floresta_datadir:/data
     healthcheck:
       test: ["CMD", "floresta-cli", "--network", "regtest", "--rpc-host", "http://127.0.0.1:18442", "ping"]
       interval: 2s
@@ -121,6 +123,7 @@ services:
       - --rpclisten=0.0.0.0:38332
       - --listen=0.0.0.0:38333
       - --utreexoproofindex
+      - --cfilters
       - --prune=0
     expose:
       - "38332"
@@ -136,3 +139,6 @@ services:
       timeout: 2s
       retries: 60
       start_period: 5s
+
+volumes:
+  floresta_datadir:

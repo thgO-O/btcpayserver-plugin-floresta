@@ -21,6 +21,20 @@ dotnet build BTCPayServer.Plugins.Floresta.csproj --no-dependencies
 
 ## Tests
 
+Integration tests and the trial deployment share the node build in
+`docker-compose.floresta.yml`. It pins Floresta to source commit
+`5698862813a6a810cc927227b1124547e9a0ad57` (2026-11-06), including the Electrum
+block-freshness and compact-filter rescan fixes. This is a development revision
+after v0.9.1, not a new upstream release. The previous integration image's build
+attestation identifies v0.9.1 commit `bc2db8d07e72651f9981ce589c5688f4d575dc7a`.
+
+The new revision has no upstream-published image, so the default builds from its
+full Git commit instead of using a registry digest. The image is tagged locally
+as `btcpay-floresta:5698862813a6`. CI explicitly builds it before running tests.
+The first build needs Rust compilation time and several GB of free disk space.
+`FLORESTA_REPO`, `FLORESTA_DOCKERFILE`, and `FLORESTA_IMAGE` still allow explicit
+overrides; an override is a different node target from the default tested here.
+
 Run unit tests:
 
 ```bash
@@ -48,6 +62,48 @@ dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Te
 
 docker compose -f docker-compose.integration.yml --profile full down -v
 ```
+
+The payment E2E also checks confirmed payments while Electrum clients keep
+polling, historical payment discovery separately through descriptor import and
+explicit rescan, and descriptor persistence across a node restart. It mines a
+payment at descriptor index120 before another at index80, in separate blocks.
+Import finds index80 and expands the node's initial 100-address horizon; the
+older index120 payment must remain absent until the explicit rescan recovers it.
+An RPC that reports success without scanning therefore cannot satisfy the test.
+This exercises the node directly and does not change the plugin's address cap.
+Floresta uses a disposable named volume so its data survives that restart; the
+cleanup command removes it.
+After checking persistence, the E2E recreates only the regtest node with a fresh
+datadir inside that disposable volume. It retains the plugin database and peers,
+requires automatic descriptor and historical payment recovery before creating
+another invoice or starting a manual scan, then checks a new payment and spend.
+The external descriptor must disappear after this reset, proving that retained
+node history cannot conceal a recovery failure.
+An observer in the disposable test database records any removal, deletion or
+spent-state transition of the known payments throughout this reset and recovery.
+Replay cannot hide a temporary loss by restoring the final cache state.
+Wallet cache reconciliation is deferred while the node reports IBD. The listener
+retains the previously known wallet height and tracks whether wallet reconciliation
+was deferred, even if the node becomes ready during initialization. Successful
+preparation is reused during IBD for the same connection and preparation settings;
+new wallets, failed preparation and changed settings are checked on later passes.
+The existing loop
+reconciles again once ready before marking initialization complete. Failed
+preparation is retried. An Electrum connection change during
+the check or address reads also invalidates that synchronization attempt.
+After recovery, the final spend verifies that genuinely spent outputs are still
+reconciled normally.
+This scenario waits for automatic descriptor registration, restarts BTCPay and
+waits for the persisted wallet to load while the node is still empty. It then
+reconnects the regtest peers and checks historical recovery during chain replay. The
+automatic rescan can still be rejected during IBD in this ordering; history is
+recovered by replay. The separate case where registration happens during IBD
+after the relevant blocks have already been processed is not covered: a rejected
+rescan is currently not retried automatically.
+The fixture enables `utreexod --cfilters` and checks that Floresta has a
+compact-filter peer, which is required for historical rescans. The historical
+payments are mined before the wallet flow and imported later, after the peers
+have had time to exchange its filters.
 
 ## Local Floresta Development
 

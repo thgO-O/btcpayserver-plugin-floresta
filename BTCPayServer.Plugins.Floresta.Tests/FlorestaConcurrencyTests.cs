@@ -25,6 +25,7 @@ public class FlorestaConcurrencyTests
             null!,
             null!,
             null!,
+            null!,
             new ConcurrentDictionary<string, DerivationStrategyBase>(),
             () => 0,
             Network.RegTest,

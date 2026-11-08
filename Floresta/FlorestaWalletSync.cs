@@ -26,10 +26,12 @@ internal sealed class FlorestaWalletSync
 
     internal sealed record WalletSyncResult(
         List<FlorestaWalletTracker.NewTransactionInfo> NewTransactions,
-        WalletAddressSyncSummary Summary);
+        WalletAddressSyncSummary Summary,
+        bool Deferred = false);
 
     private readonly FlorestaDbContextFactory _dbFactory;
     private readonly FlorestaElectrumClient _client;
+    private readonly FlorestaRpcClient _rpcClient;
     private readonly FlorestaAddressPool _addressPool;
     private readonly FlorestaUtxoCache _utxoCache;
     private readonly ConcurrentDictionary<string, DerivationStrategyBase> _trackedStrategies;
@@ -41,6 +43,7 @@ internal sealed class FlorestaWalletSync
     public FlorestaWalletSync(
         FlorestaDbContextFactory dbFactory,
         FlorestaElectrumClient client,
+        FlorestaRpcClient rpcClient,
         FlorestaAddressPool addressPool,
         FlorestaUtxoCache utxoCache,
         ConcurrentDictionary<string, DerivationStrategyBase> trackedStrategies,
@@ -50,6 +53,7 @@ internal sealed class FlorestaWalletSync
     {
         _dbFactory = dbFactory;
         _client = client;
+        _rpcClient = rpcClient;
         _addressPool = addressPool;
         _utxoCache = utxoCache;
         _trackedStrategies = trackedStrategies;
@@ -103,11 +107,11 @@ internal sealed class FlorestaWalletSync
         return SyncWalletStateWithResultAsync(walletId, addresses, ct, reportProgress);
     }
 
-    private async Task<WalletSyncResult> SyncWalletStateWithResultAsync(
+    internal async Task<WalletSyncResult> SyncWalletStateWithResultAsync(
         string walletId,
         List<TrackedAddress> addresses,
         CancellationToken ct,
-        Action<int, int> reportProgress)
+        Action<int, int> reportProgress = null)
     {
         var walletLock = GetWalletLock(walletId);
         await walletLock.WaitAsync(ct);
@@ -186,6 +190,9 @@ internal sealed class FlorestaWalletSync
         int height,
         CancellationToken ct)
     {
+        if (await IsNodeInInitialBlockDownloadAsync(ct))
+            return new();
+
         await using (var ctx = _dbFactory.CreateContext())
         {
             var state = await ctx.SyncStates.FindAsync(new object[] { "tip_height" }, ct);
@@ -231,6 +238,29 @@ internal sealed class FlorestaWalletSync
         CancellationToken ct,
         Action<int, int> reportProgress)
     {
+        var connectionGeneration = _client.ConnectionGeneration;
+        bool isInitialBlockDownload;
+        try
+        {
+            isInitialBlockDownload = await IsNodeInInitialBlockDownloadAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Wallet synchronization deferred because node readiness could not be checked");
+            isInitialBlockDownload = true;
+        }
+        if (isInitialBlockDownload)
+        {
+            // A successful response from an incomplete node is not evidence
+            // that a cached transaction or output has disappeared.
+            return new(new(), new WalletAddressSyncSummary(0, 0, addresses.Count), Deferred: true);
+        }
+        EnsureConnectionGeneration(connectionGeneration);
+
         await using var ctx = _dbFactory.CreateContext();
         var addressesToSubscribe = new List<TrackedAddress>();
         var newTxs = new List<FlorestaWalletTracker.NewTransactionInfo>();
@@ -260,7 +290,8 @@ internal sealed class FlorestaWalletSync
                         existingTxids,
                         observedHistoryTxids,
                         token,
-                        addressesToSubscribe));
+                        addressesToSubscribe,
+                        connectionGeneration));
 
                     var addedAddresses = addressesToSubscribe.Skip(beforeSubscribeCount).ToList();
                     foreach (var added in addedAddresses)
@@ -295,6 +326,18 @@ internal sealed class FlorestaWalletSync
         await ctx.SaveChangesAsync(ct);
         await SubscribeTrackedAddressesAsync(addressesToSubscribe, ct);
         return new WalletSyncResult(newTxs, summary);
+    }
+
+    private async Task<bool> IsNodeInInitialBlockDownloadAsync(CancellationToken ct)
+    {
+        var info = FlorestaChainInfoParser.Parse(await _rpcClient.GetBlockchainInfoAsync(ct));
+        return info.IsInitialBlockDownload == true;
+    }
+
+    private void EnsureConnectionGeneration(long expectedGeneration)
+    {
+        if (_client.ConnectionGeneration != expectedGeneration)
+            throw new InvalidOperationException("Floresta Electrum connection changed during wallet synchronization.");
     }
 
     internal static async Task<WalletAddressSyncSummary> ProcessAddressQueueAsync(
@@ -359,10 +402,15 @@ internal sealed class FlorestaWalletSync
         HashSet<string> existingTxids,
         HashSet<string> observedHistoryTxids,
         CancellationToken ct,
-        List<TrackedAddress> addressesToSubscribe)
+        List<TrackedAddress> addressesToSubscribe,
+        long connectionGeneration)
     {
+        EnsureConnectionGeneration(connectionGeneration);
         var newTxs = new List<FlorestaWalletTracker.NewTransactionInfo>();
         var history = await _client.ScripthashGetHistoryAsync(addr.Scripthash, ct);
+        var canUpdateAddressState = ctx.Entry(addr).State != EntityState.Detached;
+        var utxos = canUpdateAddressState ? await _utxoCache.GetReconciledAsync(addr, ct) : null;
+        EnsureConnectionGeneration(connectionGeneration);
         foreach (var item in history)
             observedHistoryTxids?.Add(item.TxHash);
 
@@ -398,10 +446,8 @@ internal sealed class FlorestaWalletSync
                 newTxs.Add(txInfo);
         }
 
-        var canUpdateAddressState = ctx.Entry(addr).State != EntityState.Detached;
         if (canUpdateAddressState)
         {
-            var utxos = await _utxoCache.GetReconciledAsync(addr, ct);
             await _utxoCache.UpdateForAddressAsync(ctx, addr, utxos, ct);
         }
 

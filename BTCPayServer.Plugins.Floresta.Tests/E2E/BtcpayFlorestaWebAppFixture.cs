@@ -49,10 +49,12 @@ public sealed class BtcpayFlorestaWebAppFixture : IAsyncLifetime
         await StartProcessAsync();
     }
 
-    public async Task RestartAsync()
+    public async Task<int> RestartAsync()
     {
         await StopProcessAsync();
+        var outputOffset = _output.Length;
         await StartProcessAsync();
+        return outputOffset;
     }
 
     private async Task StartProcessAsync()

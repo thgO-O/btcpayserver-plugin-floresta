@@ -15,6 +15,19 @@ namespace BTCPayServer.Plugins.Floresta.Tests;
 
 public class FlorestaListenerTests
 {
+    [Theory]
+    [InlineData(false, true, false, 1, 1, true)]
+    [InlineData(true, true, false, 1, 1, false)]
+    [InlineData(false, true, true, 1, 1, false)]
+    [InlineData(false, false, false, 1, 1, false)]
+    [InlineData(false, true, false, 1, 2, false)]
+    public void InitializationRequiresReconciliationAndACompatibleReadyConnection(
+        bool deferred, bool compatible, bool? ibd, long startedGeneration, long currentGeneration, bool expected)
+    {
+        Assert.Equal(expected, FlorestaListener.CanCompleteInitialization(
+            deferred, compatible, ibd, startedGeneration, currentGeneration));
+    }
+
     [Fact]
     public void InvoiceTracksScriptPubKeyOnlyForIndexedInvoiceAddress()
     {

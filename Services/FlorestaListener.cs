@@ -148,13 +148,14 @@ public class FlorestaListener : IHostedService
         }
     }
 
-    private async Task<int?> InitializeListenerAsync(CancellationToken ct)
+    internal async Task<int?> InitializeListenerAsync(CancellationToken ct)
     {
         await _initializationLock.WaitAsync(ct);
         try
         {
             if (_listenerInitialized &&
-                _initializedConnectionGeneration == _electrumClient.ConnectionGeneration)
+                _initializedConnectionGeneration == _electrumClient.ConnectionGeneration &&
+                _statusMonitor.IsInitialBlockDownload != true)
                 return null;
 
             await _statusMonitor.RefreshAsync(ct);
@@ -164,27 +165,40 @@ public class FlorestaListener : IHostedService
                 return null;
             }
 
-            await _tracker.InitializeAsync(ct);
+            var connectionGeneration = _electrumClient.ConnectionGeneration;
+            _listenerInitialized = false;
+            var synchronizationDeferred = await _tracker.InitializeAsync(ct,
+                _statusMonitor.IsInitialBlockDownload == true);
 
             var header = await _electrumClient.HeadersSubscribeAsync(ct);
             _statusMonitor.SetTipHeight(header.Height);
-            _tracker.SetTipHeight(header.Height);
             await _statusMonitor.RefreshAsync(ct);
-            if (!_statusMonitor.IsNetworkCompatible)
+            if (!CanCompleteInitialization(synchronizationDeferred,
+                    _statusMonitor.IsNetworkCompatible, _statusMonitor.IsInitialBlockDownload,
+                    connectionGeneration, _electrumClient.ConnectionGeneration))
             {
                 _listenerInitialized = false;
                 return null;
             }
 
+            var initializedHeight = _statusMonitor.ValidatedHeight ?? header.Height;
+            _tracker.SetTipHeight(initializedHeight);
             _listenerInitialized = true;
-            _initializedConnectionGeneration = _electrumClient.ConnectionGeneration;
-            _logger.LogInformation("Electrum listener initialized, tip height: {Height}", header.Height);
-            return header.Height;
+            _initializedConnectionGeneration = connectionGeneration;
+            _logger.LogInformation("Electrum listener initialized, tip height: {Height}", initializedHeight);
+            return initializedHeight;
         }
         finally
         {
             _initializationLock.Release();
         }
+    }
+
+    internal static bool CanCompleteInitialization(bool synchronizationDeferred, bool isNetworkCompatible,
+        bool? isInitialBlockDownload, long startedGeneration, long currentGeneration)
+    {
+        return !synchronizationDeferred && isNetworkCompatible && isInitialBlockDownload != true &&
+               startedGeneration == currentGeneration;
     }
 
     private void OnScripthashNotification(string scripthash, string status)

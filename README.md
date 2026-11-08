@@ -39,6 +39,9 @@ docker compose -f docker-compose.release.example.yml up -d
 
 This starts everything needed for a basic trial.
 
+The first run builds the pinned Floresta node from source and needs several GB
+of free disk space. See the [node build details](docs/development.md#tests).
+
 After it starts:
 
 1. Open `http://127.0.0.1:23000`.

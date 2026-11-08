@@ -19,6 +19,10 @@ namespace BTCPayServer.Plugins.Floresta;
 
 public class FlorestaWalletTracker : IHostedService
 {
+    private readonly record struct WalletPreparationKey(long ConnectionGeneration,
+        bool AutoRegisterDescriptors, bool AutoRescanOnNewDescriptor, int? RescanStartHeight,
+        int GapLimit, string RpcUrl, string CryptoCode);
+
     internal const string ScanCanceledError = "Scan canceled.";
     internal const string ScanPartialError =
         "One or more wallet addresses could not be synchronized. Check the server logs and try the scan again.";
@@ -56,6 +60,7 @@ public class FlorestaWalletTracker : IHostedService
     private readonly ConcurrentDictionary<string, ScanUTXOInformation> _scanStates = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<Exception>> _trackingPreparations = new();
     private readonly ConcurrentDictionary<string, WalletPreparationFlight> _walletPreparations = new();
+    private readonly ConcurrentDictionary<string, WalletPreparationKey> _preparedWallets = new();
     private Network _network;
     private DerivationStrategyFactory _derivationFactory;
     private int _tipHeight;
@@ -91,6 +96,7 @@ public class FlorestaWalletTracker : IHostedService
         _walletSync = new FlorestaWalletSync(
             _dbFactory,
             _client,
+            _rpcClient,
             _addressPool,
             _utxoCache,
             _trackedStrategies,
@@ -121,7 +127,7 @@ public class FlorestaWalletTracker : IHostedService
         Volatile.Write(ref _tipHeight, height);
     }
 
-    public async Task InitializeAsync(CancellationToken ct)
+    public async Task<bool> InitializeAsync(CancellationToken ct, bool isInitialBlockDownload = false)
     {
         List<(string walletId, List<TrackedAddress> addresses)> walletsToSubscribe;
         await using (var ctx = _dbFactory.CreateContext())
@@ -149,24 +155,52 @@ public class FlorestaWalletTracker : IHostedService
             _logger.LogInformation("Loaded {Count} tracked wallets from DB", wallets.Count);
         }
 
+        // A pass that starts in IBD must be followed by a ready-node pass,
+        // including preparation, even if IBD ends during wallet synchronization.
+        var synchronizationDeferred = isInitialBlockDownload;
+        var settings = await GetSettingsAsync();
+        var preparationKey = CreatePreparationKey(_client.ConnectionGeneration, settings);
         foreach (var (walletId, addresses) in walletsToSubscribe)
         {
+            var prepared = false;
             try
             {
                 var currentAddresses = addresses;
-                if (_trackedStrategies.ContainsKey(walletId))
-                    currentAddresses = await PrepareWalletTrackingAsync(walletId, ct);
+                // Keep discovering new/failed wallets during IBD while reusing
+                // successful preparation only for this Electrum connection.
+                if (!isInitialBlockDownload ||
+                    !_preparedWallets.TryGetValue(walletId, out var preparedKey) ||
+                    preparedKey != preparationKey)
+                {
+                    var appliedKey = preparationKey;
+                    if (_trackedStrategies.ContainsKey(walletId))
+                    {
+                        var preparation = await PrepareWalletTrackingCoreAsync(walletId, ct);
+                        currentAddresses = preparation.Addresses;
+                        appliedKey = CreatePreparationKey(preparationKey.ConnectionGeneration, preparation.Settings);
+                    }
 
-                await _walletSync.SubscribeTrackedAddressesAsync(currentAddresses, ct);
-                await _walletSync.SyncWalletStateAsync(walletId, currentAddresses, ct);
+                    await _walletSync.SubscribeTrackedAddressesAsync(currentAddresses, ct);
+                    _preparedWallets[walletId] = appliedKey;
+                }
+                prepared = true;
+                var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, currentAddresses, ct);
+                synchronizationDeferred |= result.Deferred;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
+                if (!prepared)
+                    _preparedWallets.TryRemove(walletId, out _);
                 _logger.LogWarning(ex, "Failed to sync wallet state for wallet {WalletId}", LogSafeId.Hash(walletId));
             }
         }
 
         _logger.LogInformation("Initialized {Count} tracked wallets", walletsToSubscribe.Count);
+        return synchronizationDeferred;
     }
 
     public async Task TrackWalletAsync(string strategyStr, CancellationToken ct)
@@ -176,6 +210,16 @@ public class FlorestaWalletTracker : IHostedService
     }
 
     public async Task<List<TrackedAddress>> PrepareWalletTrackingAsync(string strategyStr, CancellationToken ct)
+    {
+        return (await PrepareWalletTrackingCoreAsync(strategyStr, ct)).Addresses;
+    }
+
+    private static WalletPreparationKey CreatePreparationKey(long generation, FlorestaSettings settings) =>
+        new(generation, settings.AutoRegisterDescriptors, settings.AutoRescanOnNewDescriptor,
+            settings.DefaultRescanStartHeight, settings.GapLimit, settings.RpcUrl, settings.CryptoCode);
+
+    private async Task<(List<TrackedAddress> Addresses, FlorestaSettings Settings)> PrepareWalletTrackingCoreAsync(
+        string strategyStr, CancellationToken ct)
     {
         var preparation = await PrepareWalletAsync(strategyStr, ct);
 
@@ -190,7 +234,7 @@ public class FlorestaWalletTracker : IHostedService
         if (addresses == null)
             addresses = await GetTrackedAddressesAsync(strategyStr, ct);
 
-        return addresses;
+        return (addresses, preparation.Settings);
     }
 
     private Task<WalletPreparationContext> PrepareWalletAsync(string strategyStr, CancellationToken ct)

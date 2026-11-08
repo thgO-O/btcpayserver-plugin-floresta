@@ -65,6 +65,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nuget-
 
+      - name: Build pinned Floresta node
+        run: docker compose -f docker-compose.integration.yml build floresta
+
       - name: Build plugin and tests
         run: >
           dotnet build BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj
@@ -101,6 +104,10 @@ jobs:
           -p:EnableNETAnalyzers=false
           -nr:false
 
+      - name: Show integration logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.integration.yml logs --no-color --tail 200 floresta
+
       - name: Cleanup integration stack
         if: always()
         run: docker compose -f docker-compose.integration.yml down --volumes --remove-orphans
@@ -129,6 +136,10 @@ jobs:
           -p:RunAnalyzers=false
           -p:EnableNETAnalyzers=false
           -nr:false
+
+      - name: Show regtest logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.integration.yml --profile full logs --no-color --tail 200
 
       - name: Cleanup Playwright E2E stack
         if: always()
