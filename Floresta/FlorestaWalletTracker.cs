@@ -91,6 +91,7 @@ public class FlorestaWalletTracker : IHostedService
         _walletSync = new FlorestaWalletSync(
             _dbFactory,
             _client,
+            _rpcClient,
             _addressPool,
             _utxoCache,
             _trackedStrategies,

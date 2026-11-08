@@ -79,10 +79,22 @@ requires automatic descriptor and historical payment recovery before creating
 another invoice or starting a manual scan, then checks a new payment and spend.
 The external descriptor must disappear after this reset, proving that retained
 node history cannot conceal a recovery failure.
-This scenario waits for automatic descriptor registration before reconnecting
-the regtest peers, then checks historical recovery during chain replay. It does
-not cover the separate case where replay finishes before registration: a rescan
-rejected during IBD is currently not retried automatically.
+An observer in the disposable test database records any removal, deletion or
+spent-state transition of the known payments throughout this reset and recovery.
+Replay cannot hide a temporary loss by restoring the final cache state.
+Wallet cache reconciliation is deferred while the node reports IBD. The listener
+retains the previously known wallet height and retries initialization through
+its existing loop once the node is ready. An Electrum connection change during
+the check or address reads also invalidates that synchronization attempt.
+After recovery, the final spend verifies that genuinely spent outputs are still
+reconciled normally.
+This scenario waits for automatic descriptor registration, restarts BTCPay and
+waits for the persisted wallet to load while the node is still empty. It then
+reconnects the regtest peers and checks historical recovery during chain replay. The
+automatic rescan can still be rejected during IBD in this ordering; history is
+recovered by replay. The separate case where registration happens during IBD
+after the relevant blocks have already been processed is not covered: a rejected
+rescan is currently not retried automatically.
 The fixture enables `utreexod --cfilters` and checks that Floresta has a
 compact-filter peer, which is required for historical rescans. The historical
 payments are mined before the wallet flow and imported later, after the peers

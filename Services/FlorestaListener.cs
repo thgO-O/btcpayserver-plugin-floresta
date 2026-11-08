@@ -154,7 +154,8 @@ public class FlorestaListener : IHostedService
         try
         {
             if (_listenerInitialized &&
-                _initializedConnectionGeneration == _electrumClient.ConnectionGeneration)
+                _initializedConnectionGeneration == _electrumClient.ConnectionGeneration &&
+                _statusMonitor.IsInitialBlockDownload != true)
                 return null;
 
             await _statusMonitor.RefreshAsync(ct);
@@ -168,18 +169,19 @@ public class FlorestaListener : IHostedService
 
             var header = await _electrumClient.HeadersSubscribeAsync(ct);
             _statusMonitor.SetTipHeight(header.Height);
-            _tracker.SetTipHeight(header.Height);
             await _statusMonitor.RefreshAsync(ct);
-            if (!_statusMonitor.IsNetworkCompatible)
+            if (!_statusMonitor.IsNetworkCompatible || _statusMonitor.IsInitialBlockDownload == true)
             {
                 _listenerInitialized = false;
                 return null;
             }
 
+            var initializedHeight = _statusMonitor.ValidatedHeight ?? header.Height;
+            _tracker.SetTipHeight(initializedHeight);
             _listenerInitialized = true;
             _initializedConnectionGeneration = _electrumClient.ConnectionGeneration;
-            _logger.LogInformation("Electrum listener initialized, tip height: {Height}", header.Height);
-            return header.Height;
+            _logger.LogInformation("Electrum listener initialized, tip height: {Height}", initializedHeight);
+            return initializedHeight;
         }
         finally
         {

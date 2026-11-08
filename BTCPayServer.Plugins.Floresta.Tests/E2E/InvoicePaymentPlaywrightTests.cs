@@ -130,6 +130,8 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
 
         var spendTxId = await SpendFromBtcpayWalletWithSeed(page, storeId, bitcoinWallet);
         await WaitForBitcoinMempoolAsync(bitcoin, spendTxId);
+        var spentOutpoints = (await bitcoin.GetRawTransactionAsync(spendTxId)).Inputs
+            .Select(input => $"{input.PrevOut.Hash}:{input.PrevOut.N}").ToArray();
         await bitcoinWallet.GenerateToAddressAsync(1, await bitcoinWallet.GetNewAddressAsync());
         await SubmitBitcoinChainToUtreexodAsync(bitcoin);
         await RefreshFlorestaUtreexoPeerAsync();
@@ -137,6 +139,18 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
 
         await AssertWalletTransactionVisibleAsync(page, walletUrl, spendTxId, amountShouldBeNegative: true);
+        await EventuallyAsync(async () =>
+        {
+            await using var connection = new NpgsqlConnection(GetE2ePostgresConnectionString());
+            await connection.OpenAsync();
+            await using var command = new NpgsqlCommand("""
+                SELECT bool_and("IsSpent") FROM floresta.utxos
+                WHERE "WalletId" = @walletId AND "Outpoint" = ANY(@outpoints)
+                """, connection);
+            command.Parameters.AddWithValue("walletId", strategy);
+            command.Parameters.AddWithValue("outpoints", spentOutpoints);
+            Assert.True(Assert.IsType<bool>(await command.ExecuteScalarAsync()));
+        }, TimeSpan.FromSeconds(60), "spent outputs to be reconciled after the node has recovered");
     }
 
     public async Task InitializeAsync()
@@ -411,6 +425,8 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
         }
         Assert.All(txHashes, txId => Assert.Contains(payments, payment => payment.TxId == txId));
 
+        await using var cacheObserver = await WalletCacheTransitionObserver.StartAsync(
+            GetE2ePostgresConnectionString(), strategy, txHashes);
         await ResetFlorestaDataAsync();
         var afterReset = await FlorestaRpcAsync("listdescriptors", Array.Empty<object>());
         Assert.DoesNotContain(afterReset.EnumerateArray(), descriptor => descriptor.GetString() == externalDescriptor);
@@ -423,6 +439,17 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
             var restored = await FlorestaRpcAsync("listdescriptors", Array.Empty<object>());
             Assert.All(descriptors, expected => Assert.Contains(restored.EnumerateArray(), item => item.GetString() == expected));
         }, TimeSpan.FromSeconds(120), "node descriptors to be restored after data reset");
+
+        // Load the persisted wallet while the node is still empty. Waiting for
+        // initialization makes the cache check independent of peer timing.
+        var outputOffset = await _server.RestartAsync();
+        await EventuallyAsync(() =>
+        {
+            var output = _server.Output;
+            Assert.Contains("Initialized 1 tracked wallets", output[outputOffset..]);
+            return Task.CompletedTask;
+        }, TimeSpan.FromSeconds(120), "persisted wallet initialization while the node is empty");
+
         await ConnectRegtestMeshAsync(bitcoin);
         await RefreshFlorestaUtreexoPeerAsync();
         await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
@@ -438,6 +465,7 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
             }
         }, TimeSpan.FromSeconds(90), "known payment history to recover after node data reset");
         await AssertKnownPaymentsRemainActiveAsync(strategy, txIds);
+        await cacheObserver.AssertNoTransitionsAsync();
     }
 
     private static FlorestaElectrumClient CreateElectrumClient()
