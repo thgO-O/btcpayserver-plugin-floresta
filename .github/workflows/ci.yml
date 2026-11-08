@@ -104,6 +104,10 @@ jobs:
           -p:EnableNETAnalyzers=false
           -nr:false
 
+      - name: Show integration logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.integration.yml logs --no-color --tail 200 floresta
+
       - name: Cleanup integration stack
         if: always()
         run: docker compose -f docker-compose.integration.yml down --volumes --remove-orphans
