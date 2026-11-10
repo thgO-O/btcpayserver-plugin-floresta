@@ -443,6 +443,8 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
             var restored = await FlorestaRpcAsync("listdescriptors", Array.Empty<object>());
             Assert.All(descriptors, expected => Assert.Contains(restored.EnumerateArray(), item => item.GetString() == expected));
         }, TimeSpan.FromSeconds(120), "node descriptors to be restored after data reset");
+        Assert.Equal(FlorestaWalletRescanStatus.Pending,
+            (await ReadWalletCacheSnapshotAsync(strategy, txHashes[0])).RescanStatus);
 
         // Load the persisted wallet while the node is still empty. Waiting for
         // initialization makes the cache check independent of peer timing.
@@ -453,10 +455,18 @@ public sealed class InvoicePaymentPlaywrightTests : IAsyncLifetime
             Assert.Contains("Initialized 1 tracked wallets", output[outputOffset..]);
             return Task.CompletedTask;
         }, TimeSpan.FromSeconds(120), "persisted wallet initialization while the node is empty");
+        Assert.Equal(FlorestaWalletRescanStatus.Pending,
+            (await ReadWalletCacheSnapshotAsync(strategy, txHashes[0])).RescanStatus);
 
         await ConnectRegtestMeshAsync(bitcoin);
         await RefreshFlorestaUtreexoPeerAsync();
         await WaitForFlorestaChainAsync(await bitcoin.GetBlockCountAsync(), await GetBitcoinBestBlockHashAsync(bitcoin));
+        await EventuallyAsync(async () =>
+        {
+            var snapshot = await ReadWalletCacheSnapshotAsync(strategy, txHashes[0]);
+            Assert.Equal(FlorestaWalletRescanStatus.Requested, snapshot.RescanStatus);
+            Assert.True(snapshot.HasRescanRequestedAt);
+        }, TimeSpan.FromSeconds(120), "pending descriptor rescan to be accepted after IBD");
         await using var electrum = CreateElectrumClient();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
         await electrum.ConnectAsync(timeout.Token);

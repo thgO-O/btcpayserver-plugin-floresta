@@ -85,6 +85,21 @@ public class FlorestaRpcClientTests
 
         Assert.Contains("loaddescriptor", ex.Message);
         Assert.Contains("descriptor rejected", ex.Message);
+        Assert.Equal(-1, ex.Code);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.OK)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    public async Task KeepsStructuredIbdErrorCodeOnBothHttpStatuses(HttpStatusCode status)
+    {
+        var handler = new RecordingRpcHandler(_ => new
+        {
+            error = new { code = -32093, message = "Node is in initial block download" }
+        }) { Status = status };
+        var exception = await Assert.ThrowsAsync<FlorestaRpcException>(() =>
+            CreateClient(handler).RescanBlockchainAsync(0, null, false, "medium", CancellationToken.None));
+        Assert.Equal(-32093, exception.Code);
     }
 
     private static FlorestaRpcClient CreateClient(HttpMessageHandler handler)
@@ -100,6 +115,7 @@ public class FlorestaRpcClientTests
         private readonly Func<RpcRequest, object> _responseFactory;
 
         public List<RpcRequest> Requests { get; } = new();
+        public HttpStatusCode Status { get; init; } = HttpStatusCode.OK;
 
         public RecordingRpcHandler(Func<RpcRequest, object> responseFactory)
         {
@@ -118,7 +134,7 @@ public class FlorestaRpcClientTests
                 root.GetProperty("params").EnumerateArray().Select(e => e.Clone()).ToArray());
             Requests.Add(rpcRequest);
 
-            return new HttpResponseMessage(HttpStatusCode.OK)
+            return new HttpResponseMessage(Status)
             {
                 Content = new StringContent(JsonSerializer.Serialize(_responseFactory(rpcRequest)))
             };
