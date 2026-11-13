@@ -687,8 +687,20 @@ public class FlorestaWalletTracker : IHostedService
 
         // Keep the durable intent while IBD or an unavailable readiness RPC prevents
         // a request. Registration may already have completed on a previous process.
-        if (FlorestaChainInfoParser.Parse(await _rpcClient.GetBlockchainInfoAsync(ct)).IsInitialBlockDownload != false)
+        try
+        {
+            if (FlorestaChainInfoParser.Parse(await _rpcClient.GetBlockchainInfoAsync(ct)).IsInitialBlockDownload != false)
+                return;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Floresta descriptor rescan deferred because node readiness could not be checked");
             return;
+        }
 
         try
         {

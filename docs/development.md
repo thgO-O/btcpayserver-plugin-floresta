@@ -101,6 +101,8 @@ for an explicit non-IBD response and retries a raced IBD rejection (RPC -32093)
 on later listener initialization passes, even when no descriptors are newly
 registered. Once the listener is initialized, retries prepare only pending wallets;
 an unsuccessful import does not reinitialize other wallets or poll all invoices.
+Readiness-check failures also keep the request pending without bypassing wallet
+initialization's deferred-reconciliation guard.
 Pending intent and its start height survive a plugin restart or
 cancellation. Disabling automatic registration or rescan clears it. A successful
 RPC response records `Requested` and stops retries; other rescan errors record

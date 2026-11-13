@@ -367,6 +367,73 @@ public class FlorestaListenerInitializationTests
         }
     }
 
+    [Theory]
+    [InlineData("http-error")]
+    [InlineData("invalid-json")]
+    public async Task ReadinessFailuresDuringRescanRecoveryDoNotLoseWalletReconciliation(string failure)
+    {
+        await using var harness = new Harness();
+        harness.UpdateSettings(settings =>
+        {
+            settings.AutoRegisterDescriptors = false;
+            settings.AutoRescanOnNewDescriptor = true;
+            settings.DefaultRescanStartHeight = 12;
+        });
+        var wallet = new ExtKey().Neuter().ToString(Network.RegTest);
+        var addresses = await harness.Tracker.PrepareWalletTrackingAsync(wallet, harness.Token);
+        await harness.AddCachedOutputAsync(addresses[0]);
+        Assert.Equal(FlorestaWalletRescanStatus.NotRequested, (await harness.GetWalletAsync(wallet)).RescanStatus);
+        Assert.Empty(harness.LoadedDescriptors);
+        harness.UpdateSettings(settings => settings.AutoRegisterDescriptors = true);
+
+        var failAfterImport = false;
+        var failAfterRescan = false;
+        var readinessFailures = 0;
+        var secondFailure = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.BeforeDescriptorLoad = () =>
+        {
+            if (harness.LoadedDescriptors.Count == 1)
+                failAfterImport = true;
+            return Task.CompletedTask;
+        };
+        harness.Rescan = _ =>
+        {
+            failAfterRescan = true;
+            return Task.FromResult(Harness.Json(true));
+        };
+        harness.BlockchainInfo = _ =>
+        {
+            if (!failAfterImport && !failAfterRescan)
+                return Harness.Info(false);
+
+            if (failAfterImport)
+                failAfterImport = false;
+            else
+                failAfterRescan = false;
+            if (Interlocked.Increment(ref readinessFailures) == 2)
+                secondFailure.TrySetResult();
+            return failure == "invalid-json"
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("not JSON") }
+                : new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+        };
+
+        await harness.InitializeAsync();
+        Assert.Equal(FlorestaWalletRescanStatus.Pending, (await harness.GetWalletAsync(wallet)).RescanStatus);
+        Assert.Equal(0, harness.RescanRequests);
+
+        await harness.InitializeAsync();
+        await secondFailure.Task.WaitAsync(harness.Token);
+        // No block, notification, reconnect, invoice or manual sync repairs the cache.
+        for (var pass = 0; pass < 3; pass++)
+            await harness.InitializeAsync();
+
+        Assert.Equal(2, readinessFailures);
+        Assert.Equal(1, harness.RescanRequests);
+        Assert.Equal(FlorestaWalletRescanStatus.Requested, (await harness.GetWalletAsync(wallet)).RescanStatus);
+        Assert.Equal(12, (await harness.GetWalletAsync(wallet)).RescanStartHeight);
+        Assert.True(await harness.CachedOutputIsSpentAsync());
+    }
+
     // These tests exercise the actual tracker/listener and RPC/Electrum clients.
     // The in-memory provider checks orchestration and state transitions, not SQL;
     // the existing PostgreSQL E2E remains responsible for database fidelity.
@@ -466,6 +533,18 @@ public class FlorestaListenerInitializationTests
             {
                 WalletId = "wallet", Scripthash = "known", Txid = uint256.One.ToString(),
                 Outpoint = uint256.One + ":0", ScriptPubKey = Array.Empty<byte>(), Value = 1000
+            });
+            await ctx.SaveChangesAsync(Token);
+        }
+
+        public async Task AddCachedOutputAsync(TrackedAddress address)
+        {
+            await using var ctx = _database.CreateContext();
+            ctx.Utxos.Add(new TrackedUtxo
+            {
+                WalletId = address.WalletId, Scripthash = address.Scripthash,
+                Txid = uint256.One.ToString(), Outpoint = uint256.One + ":0",
+                ScriptPubKey = address.ScriptPubKey, KeyPath = address.KeyPath, BlockHeight = 80, Value = 1000
             });
             await ctx.SaveChangesAsync(Token);
         }
