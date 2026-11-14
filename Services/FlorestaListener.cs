@@ -153,15 +153,25 @@ public class FlorestaListener : IHostedService
         await _initializationLock.WaitAsync(ct);
         try
         {
-            if (_listenerInitialized &&
+            var retryPendingOnly = _listenerInitialized &&
                 _initializedConnectionGeneration == _electrumClient.ConnectionGeneration &&
-                _statusMonitor.IsInitialBlockDownload != true)
+                _statusMonitor.IsInitialBlockDownload != true;
+            if (retryPendingOnly && !await _tracker.HasPendingDescriptorRescansAsync(ct))
                 return null;
 
             await _statusMonitor.RefreshAsync(ct);
             if (!_statusMonitor.IsNetworkCompatible)
             {
                 _listenerInitialized = false;
+                return null;
+            }
+
+            // Refresh compatibility before retrying, without reinitializing
+            // unrelated wallets or polling every invoice for a failed import.
+            if (retryPendingOnly && _statusMonitor.IsInitialBlockDownload != true &&
+                _initializedConnectionGeneration == _electrumClient.ConnectionGeneration)
+            {
+                await _tracker.RetryPendingDescriptorRescansAsync(ct);
                 return null;
             }
 

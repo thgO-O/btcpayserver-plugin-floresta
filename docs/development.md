@@ -96,10 +96,27 @@ reconciled normally.
 This scenario waits for automatic descriptor registration, restarts BTCPay and
 waits for the persisted wallet to load while the node is still empty. It then
 reconnects the regtest peers and checks historical recovery during chain replay. The
-automatic rescan can still be rejected during IBD in this ordering; history is
-recovered by replay. The separate case where registration happens during IBD
-after the relevant blocks have already been processed is not covered: a rejected
-rescan is currently not retried automatically.
+plugin persists a pending rescan before importing missing descriptors. It waits
+for an explicit non-IBD response and retries a raced IBD rejection (RPC -32093)
+on later listener initialization passes, even when no descriptors are newly
+registered. Once the listener is initialized, retries prepare only pending wallets;
+an unsuccessful import does not reinitialize other wallets or poll all invoices.
+Readiness-check failures also keep the request pending without bypassing wallet
+initialization's deferred-reconciliation guard.
+Pending intent and its start height survive a plugin restart or
+cancellation. Disabling automatic registration or rescan clears it. A successful
+RPC response records `Requested` and stops retries; other rescan errors record
+`Failed` for operator investigation. Existing `Failed` records from older plugin
+versions are not automatically reclassified.
+
+`Requested` means the node accepted an asynchronous task, not that history is
+complete. At the pinned node revision, compact filters download after IBD and
+there is no RPC exposing their height or rescan completion. An accepted rescan
+can therefore cover incomplete filters. The controlled E2E above does not prove
+recovery when descriptor registration races replay after old blocks were already
+processed. Full automatic recovery for that ordering still needs a node API
+that reports filter coverage and scan completion; operators may need to rescan
+again after filters are available. No fixed delay establishes readiness.
 The fixture enables `utreexod --cfilters` and checks that Floresta has a
 compact-filter peer, which is required for historical rescans. The historical
 payments are mined before the wallet flow and imported later, after the peers

@@ -203,6 +203,40 @@ public class FlorestaWalletTracker : IHostedService
         return synchronizationDeferred;
     }
 
+    internal async Task<bool> HasPendingDescriptorRescansAsync(CancellationToken ct)
+    {
+        await using var ctx = _dbFactory.CreateContext();
+        return await ctx.TrackedWallets.AnyAsync(
+            wallet => wallet.RescanStatus == FlorestaWalletRescanStatus.Pending, ct);
+    }
+
+    internal async Task RetryPendingDescriptorRescansAsync(CancellationToken ct)
+    {
+        List<string> pendingWallets;
+        await using (var ctx = _dbFactory.CreateContext())
+        {
+            pendingWallets = await ctx.TrackedWallets
+                .Where(wallet => wallet.RescanStatus == FlorestaWalletRescanStatus.Pending)
+                .Select(wallet => wallet.Id).ToListAsync(ct);
+        }
+
+        foreach (var walletId in pendingWallets)
+        {
+            try
+            {
+                await PrepareAndStartTrackingAsync(walletId, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to retry descriptor rescan for wallet {WalletId}", LogSafeId.Hash(walletId));
+            }
+        }
+    }
+
     public async Task TrackWalletAsync(string strategyStr, CancellationToken ct)
     {
         var addresses = await PrepareWalletTrackingAsync(strategyStr, ct);
@@ -284,7 +318,9 @@ public class FlorestaWalletTracker : IHostedService
         if (!descriptorRegistration.Succeeded)
         {
             await UpsertWalletDescriptorMetadataAsync(strategyStr, settings, descriptorRegistration, null,
-                descriptorRegistration.Error, ct, FlorestaWalletDescriptorMetadata.ApplyRescanNotRequested);
+                descriptorRegistration.Error, ct,
+                !settings.AutoRegisterDescriptors || !settings.AutoRescanOnNewDescriptor
+                    ? FlorestaWalletDescriptorMetadata.ApplyRescanNotRequested : null);
             throw new InvalidOperationException($"Floresta descriptor registration failed: {descriptorRegistration.Error}");
         }
 
@@ -609,7 +645,12 @@ public class FlorestaWalletTracker : IHostedService
         CancellationToken ct)
     {
         if (settings.AutoRegisterDescriptors)
-            return await _descriptorRegistry.RegisterAsync(settings.CryptoCode ?? "BTC", strategyStr, ct);
+            return await _descriptorRegistry.RegisterAsync(settings.CryptoCode ?? "BTC", strategyStr, ct,
+                settings.AutoRescanOnNewDescriptor
+                    ? token => UpdateWalletRescanStateAsync(strategyStr, settings,
+                        (wallet, now) => FlorestaWalletDescriptorMetadata.ApplyRescanPending(
+                            wallet, settings.DefaultRescanStartHeight, now), token)
+                    : null);
 
         return new FlorestaDescriptorRegistrationResult(
             _descriptorService.CreateDescriptors(settings.CryptoCode ?? "BTC", strategyStr),
@@ -635,21 +676,52 @@ public class FlorestaWalletTracker : IHostedService
             return;
         }
 
-        if (descriptorRegistration.Registered == 0)
-            return;
+        int? startHeight;
+        await using (var ctx = _dbFactory.CreateContext())
+        {
+            var wallet = await ctx.TrackedWallets.FindAsync(new object[] { strategyStr }, ct);
+            if (wallet?.RescanStatus != FlorestaWalletRescanStatus.Pending)
+                return;
+            startHeight = wallet.RescanStartHeight;
+        }
 
+        // Keep the durable intent while IBD or an unavailable readiness RPC prevents
+        // a request. Registration may already have completed on a previous process.
         try
         {
-            await _rpcClient.RescanBlockchainAsync(
-                settings.DefaultRescanStartHeight,
-                null,
-                false,
-                "medium",
-                ct);
+            if (FlorestaChainInfoParser.Parse(await _rpcClient.GetBlockchainInfoAsync(ct)).IsInitialBlockDownload != false)
+                return;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Floresta descriptor rescan deferred because node readiness could not be checked");
+            return;
+        }
+
+        try
+        {
+            var result = await _rpcClient.RescanBlockchainAsync(
+                startHeight,
+                null,
+                false,
+                "medium",
+                ct);
+            if (result.ValueKind != System.Text.Json.JsonValueKind.True)
+                throw new InvalidOperationException("Floresta did not accept the descriptor rescan.");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (FlorestaRpcException ex) when (ex.Code == -32093)
+        {
+            // IBD can restart between the readiness check and rescanblockchain.
+            _logger.LogInformation("Floresta descriptor rescan deferred during initial block download");
+            return;
         }
         catch (Exception ex)
         {
@@ -658,7 +730,7 @@ public class FlorestaWalletTracker : IHostedService
                 settings,
                 (wallet, now) => FlorestaWalletDescriptorMetadata.ApplyRescanFailed(
                     wallet,
-                    settings.DefaultRescanStartHeight,
+                    startHeight,
                     ex.Message,
                     now),
                 ct);
@@ -670,13 +742,13 @@ public class FlorestaWalletTracker : IHostedService
             settings,
             (wallet, now) => FlorestaWalletDescriptorMetadata.ApplyRescanRequested(
                 wallet,
-                settings.DefaultRescanStartHeight,
+                startHeight,
                 now),
             ct);
         _logger.LogInformation(
             "Started Floresta rescan for descriptor {DescriptorHash} from height {Height}",
             descriptorRegistration.Descriptors.DescriptorHash,
-            settings.DefaultRescanStartHeight);
+            startHeight);
     }
 
     private async Task UpsertWalletDescriptorMetadataAsync(

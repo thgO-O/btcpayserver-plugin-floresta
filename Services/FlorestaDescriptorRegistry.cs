@@ -9,21 +9,13 @@ public class FlorestaDescriptorRegistry(
     FlorestaDescriptorService descriptorService,
     FlorestaRpcClient rpcClient)
 {
-    private async Task<FlorestaDescriptorRegistrationResult> RegisterAsync(
-        string cryptoCode,
-        string derivationStrategy,
-        IReadOnlySet<string> loadedDescriptors,
-        CancellationToken ct)
-    {
-        return await RegisterAsync(cryptoCode, derivationStrategy, loadedDescriptors, rpcClient, ct);
-    }
-
     public async Task<FlorestaDescriptorRegistrationResult> RegisterAsync(
         string cryptoCode,
         string derivationStrategy,
         IReadOnlySet<string> loadedDescriptors,
         FlorestaRpcClient rpcClient,
-        CancellationToken ct)
+        CancellationToken ct,
+        Func<CancellationToken, Task> beforeDescriptorLoad = null)
     {
         var alreadyRegistered = 0;
         var registered = 0;
@@ -46,6 +38,8 @@ public class FlorestaDescriptorRegistry(
                     continue;
                 }
 
+                if (beforeDescriptorLoad is not null)
+                    await beforeDescriptorLoad(ct);
                 var loadedDescriptor = await rpcClient.LoadDescriptorAsync(descriptor, ct);
                 if (!loadedDescriptor)
                 {
@@ -75,9 +69,10 @@ public class FlorestaDescriptorRegistry(
     public Task<FlorestaDescriptorRegistrationResult> RegisterAsync(
         string cryptoCode,
         string derivationStrategy,
-        CancellationToken ct)
+        CancellationToken ct,
+        Func<CancellationToken, Task> beforeDescriptorLoad = null)
     {
-        return RegisterAsync(cryptoCode, derivationStrategy, null, ct);
+        return RegisterAsync(cryptoCode, derivationStrategy, null, rpcClient, ct, beforeDescriptorLoad);
     }
 }
 
