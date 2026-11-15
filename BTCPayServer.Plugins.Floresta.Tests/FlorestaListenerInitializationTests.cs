@@ -434,6 +434,307 @@ public class FlorestaListenerInitializationTests
         Assert.True(await harness.CachedOutputIsSpentAsync());
     }
 
+    [Theory]
+    [InlineData(false, "http-error")]
+    [InlineData(false, "invalid-json")]
+    [InlineData(false, "ibd")]
+    [InlineData(true, "http-error")]
+    [InlineData(true, "invalid-json")]
+    [InlineData(true, "ibd")]
+    public async Task DeferredRescanRetryReconcilesOnlyItsWalletWithoutAnotherRescan(
+        bool failStartupRegistration, string failure)
+    {
+        await using var harness = new Harness();
+        var healthy = new ExtKey().Neuter().ToString(Network.RegTest);
+        await harness.Tracker.TrackWalletAsync(healthy, harness.Token);
+        if (!failStartupRegistration)
+            Assert.Equal(90, await harness.InitializeAsync());
+
+        harness.UpdateSettings(settings =>
+        {
+            settings.AutoRegisterDescriptors = false;
+            settings.AutoRescanOnNewDescriptor = true;
+            settings.DefaultRescanStartHeight = 12;
+        });
+        var wallet = new ExtKey().Neuter().ToString(Network.RegTest);
+        var addresses = await harness.Tracker.PrepareWalletTrackingAsync(wallet, harness.Token);
+        await harness.AddCachedOutputAsync(addresses[0]);
+        harness.UpdateSettings(settings => settings.AutoRegisterDescriptors = true);
+        if (failStartupRegistration)
+        {
+            harness.BeforeDescriptorLoad = () => throw new HttpRequestException("descriptor unavailable");
+            Assert.Equal(90, await harness.InitializeAsync());
+            harness.BeforeDescriptorLoad = () => Task.CompletedTask;
+        }
+        else
+        {
+            harness.BlockchainInfo = _ => Harness.Info(true);
+            await harness.Tracker.TrackWalletAsync(wallet, harness.Token);
+        }
+        Assert.Equal(FlorestaWalletRescanStatus.Pending, (await harness.GetWalletAsync(wallet)).RescanStatus);
+        Assert.False(await harness.CachedOutputIsSpentAsync());
+        var histories = harness.HistoryRequests;
+        var subscriptions = harness.SubscriptionRequests;
+        var failAfterRescan = false;
+        var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Rescan = _ =>
+        {
+            failAfterRescan = true;
+            return Task.FromResult(Harness.Json(true));
+        };
+        harness.BlockchainInfo = _ =>
+        {
+            if (!failAfterRescan)
+                return Harness.Info(false);
+            failAfterRescan = false;
+            deferred.TrySetResult();
+            return failure switch
+            {
+                "http-error" => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable),
+                "invalid-json" => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("not JSON") },
+                _ => Harness.Info(true)
+            };
+        };
+
+        Assert.Null(await harness.InitializeAsync());
+        await deferred.Task.WaitAsync(harness.Token);
+        Assert.Equal(FlorestaWalletRescanStatus.Requested, (await harness.GetWalletAsync(wallet)).RescanStatus);
+        Assert.False(await harness.CachedOutputIsSpentAsync());
+        var descriptorChecks = harness.DescriptorChecks;
+
+        // Only the listener retries; no block, notification, reconnect or manual sync.
+        await harness.RetryUntilWalletReconciledAsync();
+        Assert.Equal(1, harness.RescanRequests);
+        Assert.Equal(12, (await harness.GetWalletAsync(wallet)).RescanStartHeight);
+        Assert.Equal(descriptorChecks, harness.DescriptorChecks);
+        Assert.Equal(histories + addresses.Count, harness.HistoryRequests);
+        Assert.Equal(subscriptions + addresses.Count * 2, harness.SubscriptionRequests);
+
+        for (var pass = 0; pass < 3; pass++)
+            Assert.Null(await harness.InitializeAsync());
+        Assert.Equal(histories + addresses.Count, harness.HistoryRequests);
+        Assert.Equal(subscriptions + addresses.Count * 2, harness.SubscriptionRequests);
+        Assert.Equal(1, harness.RescanRequests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecoveryRetryJoiningAnImportRetainsDeferredSyncEvenIfWaiterCancels(bool cancelWaiter)
+    {
+        await using var harness = new Harness();
+        Assert.Equal(90, await harness.InitializeAsync());
+        harness.UpdateSettings(settings =>
+        {
+            settings.AutoRegisterDescriptors = false;
+            settings.AutoRescanOnNewDescriptor = true;
+        });
+        var wallet = new ExtKey().Neuter().ToString(Network.RegTest);
+        var addresses = await harness.Tracker.PrepareWalletTrackingAsync(wallet, harness.Token);
+        await harness.AddCachedOutputAsync(addresses[0]);
+        harness.UpdateSettings(settings => settings.AutoRegisterDescriptors = true);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.BeforeDescriptorLoad = async () =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(harness.Token);
+        };
+        var deferSync = false;
+        var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Rescan = _ =>
+        {
+            deferSync = true;
+            return Task.FromResult(Harness.Json(true));
+        };
+        harness.BlockchainInfo = _ =>
+        {
+            if (!deferSync)
+                return Harness.Info(false);
+            deferSync = false;
+            deferred.TrySetResult();
+            return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+        };
+
+        var import = harness.Tracker.PrepareAndStartTrackingAsync(wallet, harness.Token);
+        await entered.Task.WaitAsync(harness.Token);
+        using var waiter = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
+        var retry = harness.Tracker.RetryPendingWalletsAsync(waiter.Token);
+        Assert.False(retry.IsCompleted);
+        if (cancelWaiter)
+        {
+            waiter.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => retry);
+        }
+        release.TrySetResult();
+        await import;
+        if (!cancelWaiter)
+            await retry;
+        await deferred.Task.WaitAsync(harness.Token);
+        Assert.False(await harness.CachedOutputIsSpentAsync());
+        Assert.Equal(FlorestaWalletRescanStatus.Requested, (await harness.GetWalletAsync(wallet)).RescanStatus);
+
+        await harness.RetryUntilWalletReconciledAsync();
+        Assert.Equal(1, harness.RescanRequests);
+        Assert.Equal(addresses.Count, harness.HistoryRequests);
+    }
+
+    [Fact]
+    public async Task RestartReconcilesDeferredRecoveryWithoutResubmittingAcceptedRescan()
+    {
+        var database = new DatabaseFactory();
+        var wallet = new ExtKey().Neuter().ToString(Network.RegTest);
+        List<string> descriptors;
+        await using (var first = new Harness(database))
+        {
+            Assert.Equal(90, await first.InitializeAsync());
+            first.UpdateSettings(settings =>
+            {
+                settings.AutoRegisterDescriptors = false;
+                settings.AutoRescanOnNewDescriptor = true;
+                settings.DefaultRescanStartHeight = 12;
+            });
+            var addresses = await first.Tracker.PrepareWalletTrackingAsync(wallet, first.Token);
+            await first.AddCachedOutputAsync(addresses[0]);
+            first.UpdateSettings(settings => settings.AutoRegisterDescriptors = true);
+            first.BlockchainInfo = _ => Harness.Info(true);
+            await first.Tracker.TrackWalletAsync(wallet, first.Token);
+            var deferSync = false;
+            var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            first.Rescan = _ =>
+            {
+                deferSync = true;
+                return Task.FromResult(Harness.Json(true));
+            };
+            first.BlockchainInfo = _ =>
+            {
+                if (!deferSync)
+                    return Harness.Info(false);
+                deferSync = false;
+                deferred.TrySetResult();
+                return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            };
+            Assert.Null(await first.InitializeAsync());
+            await deferred.Task.WaitAsync(first.Token);
+            Assert.False(await first.CachedOutputIsSpentAsync());
+            Assert.Equal(FlorestaWalletRescanStatus.Requested, (await first.GetWalletAsync(wallet)).RescanStatus);
+            descriptors = new List<string>(first.LoadedDescriptors);
+        }
+
+        await using var restarted = new Harness(database);
+        restarted.LoadedDescriptors.UnionWith(descriptors);
+        restarted.UpdateSettings(settings => settings.AutoRescanOnNewDescriptor = true);
+        Assert.Equal(90, await restarted.InitializeAsync());
+        Assert.True(await restarted.CachedOutputIsSpentAsync());
+        Assert.Equal(FlorestaWalletRescanStatus.Requested, (await restarted.GetWalletAsync(wallet)).RescanStatus);
+        Assert.Equal(12, (await restarted.GetWalletAsync(wallet)).RescanStartHeight);
+        Assert.Equal(0, restarted.RescanRequests);
+        Assert.False(restarted.Tracker.HasDeferredWalletSynchronizations);
+    }
+
+    [Fact]
+    public async Task ImportStillValidatesDescriptorsDuringAnAcceptedRescanSynchronizationRetry()
+    {
+        await using var harness = new Harness();
+        Assert.Equal(90, await harness.InitializeAsync());
+        harness.UpdateSettings(settings =>
+        {
+            settings.AutoRegisterDescriptors = false;
+            settings.AutoRescanOnNewDescriptor = true;
+        });
+        var wallet = new ExtKey().Neuter().ToString(Network.RegTest);
+        var addresses = await harness.Tracker.PrepareWalletTrackingAsync(wallet, harness.Token);
+        await harness.AddCachedOutputAsync(addresses[0]);
+        harness.UpdateSettings(settings => settings.AutoRegisterDescriptors = true);
+        harness.BlockchainInfo = _ => Harness.Info(true);
+        await harness.Tracker.TrackWalletAsync(wallet, harness.Token);
+        var deferSync = false;
+        var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Rescan = _ =>
+        {
+            deferSync = true;
+            return Task.FromResult(Harness.Json(true));
+        };
+        harness.BlockchainInfo = _ =>
+        {
+            if (!deferSync)
+                return Harness.Info(false);
+            deferSync = false;
+            deferred.TrySetResult();
+            return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+        };
+        await harness.InitializeAsync();
+        await deferred.Task.WaitAsync(harness.Token);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.BeforeSubscription = async () =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(harness.Token);
+        };
+        Task<int?> recovery;
+        do
+        {
+            recovery = harness.InitializeAsync();
+            await Task.WhenAny(recovery, entered.Task).WaitAsync(harness.Token);
+            if (!entered.Task.IsCompleted)
+            {
+                await recovery;
+                await Task.Delay(10, harness.Token);
+            }
+        } while (!entered.Task.IsCompleted);
+
+        try
+        {
+            harness.FailNextDescriptorList = true;
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                harness.Tracker.PrepareAndStartTrackingAsync(wallet, harness.Token));
+            Assert.False(harness.FailNextDescriptorList);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await recovery;
+        }
+        Assert.Equal(1, harness.RescanRequests);
+        Assert.True(await harness.CachedOutputIsSpentAsync());
+    }
+
+    [Fact]
+    public async Task FailedPreparationDoesNotBecomeASyncOnlyRetryAfterRescanIsDisabled()
+    {
+        await using var harness = new Harness();
+        Assert.Equal(90, await harness.InitializeAsync());
+        harness.UpdateSettings(settings =>
+        {
+            settings.AutoRegisterDescriptors = false;
+            settings.AutoRescanOnNewDescriptor = true;
+        });
+        var wallet = new ExtKey().Neuter().ToString(Network.RegTest);
+        var addresses = await harness.Tracker.PrepareWalletTrackingAsync(wallet, harness.Token);
+        await harness.AddCachedOutputAsync(addresses[0]);
+        harness.UpdateSettings(settings => settings.AutoRegisterDescriptors = true);
+        harness.BeforeDescriptorLoad = () => throw new HttpRequestException("descriptor unavailable");
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            harness.Tracker.TrackWalletAsync(wallet, harness.Token));
+        await harness.InitializeAsync();
+        harness.UpdateSettings(settings => settings.AutoRescanOnNewDescriptor = false);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        do
+        {
+            await harness.InitializeAsync();
+            await Task.Delay(10, deadline.Token);
+        } while ((await harness.GetWalletAsync(wallet)).RescanStatus != FlorestaWalletRescanStatus.NotRequested ||
+                 harness.Tracker.HasDeferredWalletSynchronizations);
+
+        Assert.False(await harness.CachedOutputIsSpentAsync());
+        Assert.Equal(0, harness.HistoryRequests);
+        Assert.Equal(0, harness.RescanRequests);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            harness.Tracker.PrepareAndStartTrackingAsync(wallet, harness.Token));
+    }
+
     // These tests exercise the actual tracker/listener and RPC/Electrum clients.
     // The in-memory provider checks orchestration and state transitions, not SQL;
     // the existing PostgreSQL E2E remains responsible for database fidelity.
@@ -456,6 +757,7 @@ public class FlorestaListenerInitializationTests
         public bool FailNextDescriptorLoad { get; set; }
         public bool FailNextDescriptorList { get; set; }
         public Func<Task> BeforeDescriptorLoad { get; set; } = () => Task.CompletedTask;
+        public Func<Task> BeforeSubscription { get; set; } = () => Task.CompletedTask;
         public HashSet<string> LoadedDescriptors { get; } = new();
         public int DescriptorChecks { get; private set; }
         public int HistoryRequests { get; private set; }
@@ -482,6 +784,19 @@ public class FlorestaListenerInitializationTests
                 await Task.Delay(10, Token);
             } while (DateTimeOffset.UtcNow < deadline);
             Assert.Equal(FlorestaWalletRescanStatus.Requested, (await GetWalletAsync(wallet)).RescanStatus);
+        }
+
+        public async Task RetryUntilWalletReconciledAsync()
+        {
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+            while ((!await CachedOutputIsSpentAsync() || Tracker.HasDeferredWalletSynchronizations) &&
+                   DateTimeOffset.UtcNow < deadline)
+            {
+                await InitializeAsync();
+                await Task.Delay(10, Token);
+            }
+            Assert.True(await CachedOutputIsSpentAsync());
+            Assert.False(Tracker.HasDeferredWalletSynchronizations);
         }
 
         public Harness(DatabaseFactory? database = null)
@@ -635,6 +950,8 @@ public class FlorestaListenerInitializationTests
                     while (await reader.ReadLineAsync(Token) is { } line)
                     {
                         using var request = JsonDocument.Parse(line);
+                        if (request.RootElement.GetProperty("method").GetString() == "blockchain.scripthash.subscribe")
+                            await BeforeSubscription();
                         object? result = request.RootElement.GetProperty("method").GetString() switch
                         {
                             "server.ping" => null,

@@ -103,9 +103,13 @@ registered. Once the listener is initialized, retries prepare only pending walle
 an unsuccessful import does not reinitialize other wallets or poll all invoices.
 Readiness-check failures also keep the request pending without bypassing wallet
 initialization's deferred-reconciliation guard.
+If the background synchronization after a retry is deferred or incomplete, the
+tracker retains a per-wallet synchronization retry in memory. For an accepted
+rescan, later listener passes synchronize only those wallets without preparing
+descriptors again or resubmitting the rescan. Restart uses normal full initialization instead.
 Pending intent and its start height survive a plugin restart or
 cancellation. Disabling automatic registration or rescan clears it. A successful
-RPC response records `Requested` and stops retries; other rescan errors record
+RPC response records `Requested` and stops rescan retries; other rescan errors record
 `Failed` for operator investigation. Existing `Failed` records from older plugin
 versions are not automatically reclassified.
 

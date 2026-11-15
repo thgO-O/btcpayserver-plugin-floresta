@@ -61,6 +61,7 @@ public class FlorestaWalletTracker : IHostedService
     private readonly ConcurrentDictionary<string, TaskCompletionSource<Exception>> _trackingPreparations = new();
     private readonly ConcurrentDictionary<string, WalletPreparationFlight> _walletPreparations = new();
     private readonly ConcurrentDictionary<string, WalletPreparationKey> _preparedWallets = new();
+    private readonly ConcurrentDictionary<string, byte> _deferredWalletSynchronizations = new();
     private Network _network;
     private DerivationStrategyFactory _derivationFactory;
     private int _tipHeight;
@@ -210,21 +211,48 @@ public class FlorestaWalletTracker : IHostedService
             wallet => wallet.RescanStatus == FlorestaWalletRescanStatus.Pending, ct);
     }
 
-    internal async Task RetryPendingDescriptorRescansAsync(CancellationToken ct)
+    internal bool HasDeferredWalletSynchronizations => !_deferredWalletSynchronizations.IsEmpty;
+
+    internal async Task RetryPendingWalletsAsync(CancellationToken ct)
     {
-        List<string> pendingWallets;
+        HashSet<string> pendingRescans;
         await using (var ctx = _dbFactory.CreateContext())
         {
-            pendingWallets = await ctx.TrackedWallets
+            pendingRescans = await ctx.TrackedWallets
                 .Where(wallet => wallet.RescanStatus == FlorestaWalletRescanStatus.Pending)
-                .Select(wallet => wallet.Id).ToListAsync(ct);
+                .Select(wallet => wallet.Id).ToHashSetAsync(ct);
         }
 
-        foreach (var walletId in pendingWallets)
+        foreach (var walletId in pendingRescans.Union(_deferredWalletSynchronizations.Keys))
         {
             try
             {
-                await PrepareAndStartTrackingAsync(walletId, ct);
+                // A retry can join an import job whose sync cannot report Deferred.
+                _deferredWalletSynchronizations.TryAdd(walletId, 0);
+                if (pendingRescans.Contains(walletId))
+                {
+                    await PrepareAndStartTrackingAsync(walletId,
+                        token => PrepareWalletTrackingAsync(walletId, token),
+                        (addresses, token) => SubscribeAndSyncRecoveryWalletAsync(walletId, addresses, token),
+                        ct);
+                }
+                else if (!_trackingPreparations.ContainsKey(walletId))
+                {
+                    await using var ctx = _dbFactory.CreateContext();
+                    var wallet = await ctx.TrackedWallets.FindAsync(new object[] { walletId }, ct);
+                    if (wallet?.RescanStatus == FlorestaWalletRescanStatus.Pending)
+                        continue;
+                    if (wallet?.RescanStatus != FlorestaWalletRescanStatus.Requested)
+                    {
+                        _deferredWalletSynchronizations.TryRemove(walletId, out _);
+                        continue;
+                    }
+
+                    // An import must never join a sync-only job and skip its
+                    // descriptor preparation. The listener awaits this sync.
+                    await SubscribeAndSyncRecoveryWalletAsync(walletId,
+                        await GetTrackedAddressesAsync(walletId, ct), ct);
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -232,9 +260,20 @@ public class FlorestaWalletTracker : IHostedService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to retry descriptor rescan for wallet {WalletId}", LogSafeId.Hash(walletId));
+                _logger.LogWarning(ex, "Failed to retry wallet recovery for wallet {WalletId}", LogSafeId.Hash(walletId));
             }
         }
+    }
+
+    private async Task SubscribeAndSyncRecoveryWalletAsync(
+        string walletId, List<TrackedAddress> addresses, CancellationToken ct)
+    {
+        // Sync-only retries wait until tracking jobs finish. Restart recovers
+        // through normal full initialization rather than persisting this set.
+        await _walletSync.SubscribeTrackedAddressesAsync(addresses, ct);
+        var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, addresses, ct);
+        if (!result.Deferred && result.Summary.IsComplete)
+            _deferredWalletSynchronizations.TryRemove(walletId, out _);
     }
 
     public async Task TrackWalletAsync(string strategyStr, CancellationToken ct)

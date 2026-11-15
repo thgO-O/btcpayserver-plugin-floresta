@@ -156,7 +156,8 @@ public class FlorestaListener : IHostedService
             var retryPendingOnly = _listenerInitialized &&
                 _initializedConnectionGeneration == _electrumClient.ConnectionGeneration &&
                 _statusMonitor.IsInitialBlockDownload != true;
-            if (retryPendingOnly && !await _tracker.HasPendingDescriptorRescansAsync(ct))
+            if (retryPendingOnly && !_tracker.HasDeferredWalletSynchronizations &&
+                !await _tracker.HasPendingDescriptorRescansAsync(ct))
                 return null;
 
             await _statusMonitor.RefreshAsync(ct);
@@ -171,7 +172,7 @@ public class FlorestaListener : IHostedService
             if (retryPendingOnly && _statusMonitor.IsInitialBlockDownload != true &&
                 _initializedConnectionGeneration == _electrumClient.ConnectionGeneration)
             {
-                await _tracker.RetryPendingDescriptorRescansAsync(ct);
+                await _tracker.RetryPendingWalletsAsync(ct);
                 return null;
             }
 
