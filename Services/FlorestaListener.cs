@@ -130,6 +130,8 @@ public class FlorestaListener : IHostedService
                 }
 
                 var initializedHeight = await InitializeListenerAsync(ct);
+                if (_statusMonitor.IsNetworkCompatible)
+                    await ProcessRecoveredTransactionsAsync(ProcessRecoveredTransactionAsync, ct);
                 if (initializedHeight is not null)
                     await RequestPaymentPollingAsync(ct);
 
@@ -328,6 +330,52 @@ public class FlorestaListener : IHostedService
         {
             ct.ThrowIfCancellationRequested();
             await ProcessNewTransaction(newTx, network, wallet, pmi, ct);
+        }
+    }
+
+    private async Task<bool> ProcessRecoveredTransactionAsync(
+        FlorestaWalletTracker.NewTransactionInfo transaction, CancellationToken ct)
+    {
+        var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
+        if (network == null) return false;
+        var wallet = _walletProvider.GetWallet(network);
+        if (wallet == null || _handlers.GetBitcoinHandler(network) == null) return false;
+
+        await ProcessNewTransaction(transaction, network, wallet,
+            PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode), ct);
+        return true;
+    }
+
+    internal async Task ProcessRecoveredTransactionsAsync(
+        Func<FlorestaWalletTracker.NewTransactionInfo, CancellationToken, Task<bool>> process,
+        CancellationToken ct)
+    {
+        // One bounded pass: failed deliveries remain for the existing listener
+        // loop, while other recovered transactions can still be processed.
+        var count = _tracker.RecoveredTransactions.Count;
+        for (var i = 0; i < count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            // This loop is the only consumer. Keep the head while awaiting the
+            // payment pipeline so cancellation cannot acknowledge it early.
+            if (!_tracker.RecoveredTransactions.TryPeek(out var transaction))
+                break;
+            var processed = false;
+            try
+            {
+                processed = await process(transaction, ct);
+                ct.ThrowIfCancellationRequested();
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to process recovered transaction {TxId}; retrying", transaction.TxId);
+            }
+            if (_tracker.RecoveredTransactions.TryDequeue(out var delivered) && !processed)
+                _tracker.RecoveredTransactions.Enqueue(delivered);
         }
     }
 

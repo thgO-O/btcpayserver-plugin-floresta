@@ -62,6 +62,7 @@ public class FlorestaWalletTracker : IHostedService
     private readonly ConcurrentDictionary<string, WalletPreparationFlight> _walletPreparations = new();
     private readonly ConcurrentDictionary<string, WalletPreparationKey> _preparedWallets = new();
     private readonly ConcurrentDictionary<string, byte> _deferredWalletSynchronizations = new();
+    internal ConcurrentQueue<NewTransactionInfo> RecoveredTransactions { get; } = new();
     private Network _network;
     private DerivationStrategyFactory _derivationFactory;
     private int _tipHeight;
@@ -233,7 +234,7 @@ public class FlorestaWalletTracker : IHostedService
                 {
                     await PrepareAndStartTrackingAsync(walletId,
                         token => PrepareWalletTrackingAsync(walletId, token),
-                        (addresses, token) => SubscribeAndSyncRecoveryWalletAsync(walletId, addresses, token),
+                        (addresses, token) => SubscribeAndSyncWalletCoreAsync(walletId, addresses, token),
                         ct);
                 }
                 else if (!_trackingPreparations.ContainsKey(walletId))
@@ -250,7 +251,7 @@ public class FlorestaWalletTracker : IHostedService
 
                     // An import must never join a sync-only job and skip its
                     // descriptor preparation. The listener awaits this sync.
-                    await SubscribeAndSyncRecoveryWalletAsync(walletId,
+                    await SubscribeAndSyncWalletCoreAsync(walletId,
                         await GetTrackedAddressesAsync(walletId, ct), ct);
                 }
             }
@@ -265,13 +266,17 @@ public class FlorestaWalletTracker : IHostedService
         }
     }
 
-    private async Task SubscribeAndSyncRecoveryWalletAsync(
+    private async Task SubscribeAndSyncWalletCoreAsync(
         string walletId, List<TrackedAddress> addresses, CancellationToken ct)
     {
         // Sync-only retries wait until tracking jobs finish. Restart recovers
         // through normal full initialization rather than persisting this set.
         await _walletSync.SubscribeTrackedAddressesAsync(addresses, ct);
         var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, addresses, ct);
+        // The cache now knows these txids, so later syncs will not rediscover
+        // them. Keep the complete transaction until the listener processes it.
+        foreach (var transaction in result.NewTransactions)
+            RecoveredTransactions.Enqueue(transaction);
         if (!result.Deferred && result.Summary.IsComplete)
             _deferredWalletSynchronizations.TryRemove(walletId, out _);
     }
@@ -486,8 +491,8 @@ public class FlorestaWalletTracker : IHostedService
     {
         addresses ??= await GetTrackedAddressesAsync(strategyStr, ct);
 
-        await _walletSync.SubscribeTrackedAddressesAsync(addresses, ct);
-        await _walletSync.SyncWalletStateAsync(strategyStr, addresses, ct);
+        // A recovery retry may share this import's tracking job.
+        await SubscribeAndSyncWalletCoreAsync(strategyStr, addresses, ct);
         _logger.LogInformation("Now tracking wallet {WalletId}", LogSafeId.Hash(strategyStr));
     }
 
