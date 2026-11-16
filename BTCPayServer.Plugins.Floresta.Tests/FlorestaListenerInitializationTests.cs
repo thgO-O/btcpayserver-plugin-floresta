@@ -931,11 +931,14 @@ public class FlorestaListenerInitializationTests
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
+    [InlineData(false, "ready")]
+    [InlineData(true, "ready")]
+    [InlineData(true, "join-import")]
+    [InlineData(true, "partial-transaction")]
+    [InlineData(true, "rpc-refresh")]
+    [InlineData(true, "reconnect")]
     public async Task QuietListenerRecordsRecoveredInvoicePaymentEvenWhenReceiptIsAlreadySpent(
-        bool alreadySpent, bool joinImport)
+        bool alreadySpent, string scenario)
     {
         var invoices = new InvoiceDatabase();
         await using var harness = new Harness(invoices: invoices);
@@ -952,8 +955,34 @@ public class FlorestaListenerInitializationTests
         harness.BlockchainInfo = _ => Harness.Info(true);
         await harness.Tracker.TrackWalletAsync(wallet, harness.Token);
         var transaction = harness.SetRecoveredHistory(addresses[0], alreadySpent);
-        harness.BlockchainInfo = _ => Harness.Info(false);
-        if (joinImport)
+        var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var deferSync = false;
+        if (scenario is "rpc-refresh" or "reconnect")
+            harness.Rescan = _ =>
+            {
+                deferSync = true;
+                return Task.FromResult(Harness.Json(true));
+            };
+        harness.BlockchainInfo = _ =>
+        {
+            if (!deferSync)
+                return Harness.Info(false);
+            deferSync = false;
+            deferred.TrySetResult();
+            return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+        };
+        if (scenario == "partial-transaction")
+        {
+            var unavailableTx = uint256.One.ToString();
+            harness.FailedTransactions.Add(unavailableTx);
+            harness.HistoryResponse = script => script == addresses[0].Scripthash
+                ? new object[]
+                {
+                    new { tx_hash = transaction.GetHash().ToString(), height = 80 },
+                    new { tx_hash = unavailableTx, height = 80 }
+                } : Array.Empty<object>();
+        }
+        if (scenario == "join-import")
         {
             harness.LoadedDescriptors.Clear();
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -974,13 +1003,45 @@ public class FlorestaListenerInitializationTests
             await harness.InitializeAsync();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
-        while (harness.Tracker.RecoveredTransactions.IsEmpty || harness.Tracker.HasDeferredWalletSynchronizations)
+        if (scenario is "rpc-refresh" or "reconnect")
+        {
+            await deferred.Task.WaitAsync(deadline.Token);
+            Assert.True(harness.Tracker.HasDeferredWalletSynchronizations);
+            Assert.Empty(harness.Tracker.RecoveredTransactions);
+            var generation = harness.Electrum.ConnectionGeneration;
+            if (scenario == "rpc-refresh")
+            {
+                harness.BlockchainInfo = _ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+                Assert.Null(await harness.InitializeAsync());
+                Assert.False(harness.Monitor.IsNetworkCompatible);
+                harness.BlockchainInfo = _ => Harness.Info(false);
+            }
+            else
+                await harness.Electrum.DisconnectAsync();
+            // The same process still owes recovery delivery even though the
+            // next listener pass takes the full-initialization path.
+            Assert.Equal(90, await harness.InitializeAsync());
+            if (scenario == "reconnect")
+                Assert.True(harness.Electrum.ConnectionGeneration > generation);
+        }
+        while (harness.Tracker.RecoveredTransactions.IsEmpty)
             await Task.Delay(10, deadline.Token);
+        if (scenario == "partial-transaction")
+        {
+            Assert.True(harness.Tracker.HasDeferredWalletSynchronizations);
+            harness.FailedTransactions.Clear();
+            harness.SetRecoveredHistory(addresses[0], alreadySpent);
+        }
+        while (harness.Tracker.HasDeferredWalletSynchronizations)
+        {
+            await harness.InitializeAsync();
+            await Task.Delay(10, deadline.Token);
+        }
         await using (var ctx = invoices.CreateContext())
             Assert.Empty(await ctx.Payments.ToListAsync(harness.Token));
 
-        // Start an already initialized, quiet listener: no block, notification,
-        // reconnect or full-init polling can discover this payment for it.
+        // Start an initialized, quiet listener after recovery: no further block,
+        // notification or reconnect can discover this payment for it.
         await EnvironmentVariableTestHelper.WithBackendReplacementEnvironmentAsync("true", async () =>
         {
             await harness.Listener.StartAsync(harness.Token);
@@ -1094,6 +1155,7 @@ public class FlorestaListenerInitializationTests
         public Func<string, object> BalanceResponse { get; set; } = _ => new { confirmed = 0, unconfirmed = 0 };
         public Dictionary<string, string> RawTransactions { get; } = new();
         public HashSet<string> FailedHistoryScripts { get; } = new();
+        public HashSet<string> FailedTransactions { get; } = new();
         public int DescriptorChecks { get; private set; }
         public int HistoryRequests { get; private set; }
         public int SubscriptionRequests { get; private set; }
@@ -1368,6 +1430,8 @@ public class FlorestaListenerInitializationTests
                             await BeforeSubscription();
                         var historyFailed = request.RootElement.GetProperty("method").GetString() == "blockchain.scripthash.get_history" &&
                             FailedHistoryScripts.Contains(request.RootElement.GetProperty("params")[0].GetString()!);
+                        var transactionFailed = request.RootElement.GetProperty("method").GetString() == "blockchain.transaction.get" &&
+                            FailedTransactions.Contains(request.RootElement.GetProperty("params")[0].GetString()!);
                         object? result = request.RootElement.GetProperty("method").GetString() switch
                         {
                             "server.ping" => null,
@@ -1378,13 +1442,13 @@ public class FlorestaListenerInitializationTests
                             "blockchain.scripthash.get_history" => historyFailed ? null : History(request.RootElement.GetProperty("params")[0].GetString()!),
                             "blockchain.scripthash.listunspent" => UnspentResponse(request.RootElement.GetProperty("params")[0].GetString()!),
                             "blockchain.scripthash.get_balance" => BalanceResponse(request.RootElement.GetProperty("params")[0].GetString()!),
-                            "blockchain.transaction.get" => RawTransactions[request.RootElement.GetProperty("params")[0].GetString()!],
+                            "blockchain.transaction.get" => transactionFailed ? null : RawTransactions[request.RootElement.GetProperty("params")[0].GetString()!],
                             _ => throw new InvalidOperationException("Unexpected Electrum request in initialization test")
                         };
                         await writer.WriteLineAsync(JsonSerializer.Serialize(new
                         {
                             jsonrpc = "2.0", id = request.RootElement.GetProperty("id").GetInt32(), result,
-                            error = historyFailed ? new { code = -32000, message = "history temporarily unavailable" } : null
+                            error = historyFailed || transactionFailed ? new { code = -32000, message = "Electrum result temporarily unavailable" } : null
                         }));
                     }
                 }

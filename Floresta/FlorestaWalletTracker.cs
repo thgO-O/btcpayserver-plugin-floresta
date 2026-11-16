@@ -186,7 +186,12 @@ public class FlorestaWalletTracker : IHostedService
                     _preparedWallets[walletId] = appliedKey;
                 }
                 prepared = true;
+                var recoveryPending = _deferredWalletSynchronizations.ContainsKey(walletId);
                 var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, currentAddresses, ct);
+                // Reconnection or a failed health refresh can switch an active
+                // recovery to full initialization without losing its delivery.
+                if (recoveryPending || _deferredWalletSynchronizations.ContainsKey(walletId))
+                    RecordRecoverySynchronizationResult(walletId, result);
                 synchronizationDeferred |= result.Deferred;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -273,6 +278,11 @@ public class FlorestaWalletTracker : IHostedService
         // through normal full initialization rather than persisting this set.
         await _walletSync.SubscribeTrackedAddressesAsync(addresses, ct);
         var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, addresses, ct);
+        RecordRecoverySynchronizationResult(walletId, result);
+    }
+
+    private void RecordRecoverySynchronizationResult(string walletId, FlorestaWalletSync.WalletSyncResult result)
+    {
         // The cache now knows these txids, so later syncs will not rediscover
         // them. Keep the complete transaction until the listener processes it.
         foreach (var transaction in result.NewTransactions)

@@ -111,8 +111,11 @@ Transactions found by recovery are retained in memory for the listener's existin
 loop to deliver through normal transaction/payment processing, outside the
 initialization lock. Failed deliveries stay queued for a later pass. This also
 preserves received outputs that are already spent, without polling every invoice
-after an unsuccessful or still-deferred retry. The queue is not durable across
-process termination; restart retains the existing full-initialization catch-up.
+after an unsuccessful or still-deferred retry. Transactions discovered before a
+later failure within the same address are retained when that sync commits. Full
+initialization in the same process also delivers results for outstanding recovery
+work. The queue is not durable across process termination; restart retains the
+existing full-initialization catch-up.
 Pending intent and its start height survive a plugin restart or
 cancellation. Disabling automatic registration or rescan clears it. A successful
 RPC response records `Requested` and stops rescan retries; other rescan errors record
