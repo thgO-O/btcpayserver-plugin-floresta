@@ -113,9 +113,17 @@ an unsuccessful import does not reinitialize other wallets or poll all invoices.
 Readiness-check failures also keep the request pending without bypassing wallet
 initialization's deferred-reconciliation guard.
 If synchronization after an import or recovery retry is deferred or incomplete,
-the tracker retains per-wallet synchronization work in memory. For an accepted
-rescan, later listener passes synchronize only those wallets without preparing
-descriptors again or resubmitting the rescan. Restart uses normal full initialization instead.
+the tracker retains per-wallet synchronization work in memory. Results reached
+after successful preparation remain eligible for synchronization even when
+automatic rescan is disabled and the rescan status is `NotRequested`. This is
+distinct from work still waiting for preparation. A later failed preparation
+invalidates this rescan-independent eligibility, including a rejected rescan
+after successful descriptor registration. A process-local failure generation
+prevents an older synchronization result from restoring that eligibility.
+An old persisted rescan failure does not block a later successful import.
+Later listener passes synchronize
+only eligible wallets without preparing descriptors again or requesting another
+rescan. Restart uses normal full initialization instead.
 Transactions found by recovery are retained in memory for the listener's existing
 loop to deliver through normal transaction/payment processing, outside the
 initialization lock. Failed deliveries stay queued for a later pass. This also

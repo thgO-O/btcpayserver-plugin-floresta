@@ -744,6 +744,98 @@ public partial class FlorestaListenerInitializationTests
     }
 
     [Theory]
+    [InlineData(false, false, false, false)]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(true, true, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(true, false, true, false)]
+    [InlineData(false, false, false, true)]
+    [InlineData(false, false, true, true)]
+    public async Task FailedRepreparationDoesNotRetryRecordedNoRescanSynchronization(
+        bool rescanRejected, bool scan, bool retryInFlight, bool metadataUnavailable)
+    {
+        await using var harness = new Harness();
+        Assert.Equal(90, await harness.InitializeAsync());
+        harness.UpdateSettings(s => { s.AutoRegisterDescriptors = false; s.AutoRescanOnNewDescriptor = false; });
+        var wallet = new ExtKey().Neuter().ToString(Network.RegTest);
+        var address = (await harness.Tracker.PrepareWalletTrackingAsync(wallet, harness.Token))[0];
+        await harness.AddCachedOutputAsync(address);
+        harness.UpdateSettings(s => s.AutoRegisterDescriptors = !rescanRejected);
+        harness.BlockchainInfo = _ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+        await harness.Tracker.TrackWalletAsync(wallet, harness.Token);
+        Assert.True(harness.Tracker.HasDeferredWalletSynchronizations);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? retry = null;
+        if (retryInFlight)
+        {
+            harness.BeforeSubscription = () =>
+            {
+                entered.TrySetResult();
+                return release.Task.WaitAsync(deadline.Token);
+            };
+            retry = harness.Tracker.RetryPendingWalletsAsync(deadline.Token);
+            await entered.Task.WaitAsync(deadline.Token);
+        }
+
+        // A previous successful preparation must not authorize synchronization
+        // after a later import has failed preparation, including a rejected
+        // rescan whose descriptor registration itself succeeded.
+        harness.UpdateSettings(s =>
+        {
+            s.AutoRegisterDescriptors = true;
+            s.AutoRescanOnNewDescriptor = rescanRejected;
+        });
+        harness.BlockchainInfo = _ => Harness.Info(false);
+        if (metadataUnavailable)
+            harness.Database.FailNextContext = true;
+        else if (rescanRejected)
+            harness.Rescan = _ => Task.FromResult(Harness.Json(false));
+        else
+            harness.FailNextDescriptorList = true;
+        try
+        {
+            if (scan)
+            {
+                Assert.True(harness.Tracker.StartScan(wallet, 2, 0));
+                while (harness.Tracker.GetScanState(wallet)?.Status != NBXplorer.Models.ScanUTXOStatus.Error)
+                    await Task.Delay(10, deadline.Token);
+            }
+            else
+                await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                    harness.Tracker.PrepareAndStartTrackingAsync(wallet, harness.Token));
+        }
+        finally
+        {
+            // A sync already in flight can report deferred after preparation
+            // fails. Its captured failure generation must prevent another retry.
+            harness.BlockchainInfo = _ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            release.TrySetResult();
+            if (retry is not null)
+                await retry.WaitAsync(deadline.Token);
+            harness.BeforeSubscription = () => Task.CompletedTask;
+            harness.BlockchainInfo = _ => Harness.Info(false);
+        }
+        var failedWallet = await harness.GetWalletAsync(wallet);
+        Assert.Equal(rescanRejected || metadataUnavailable ? FlorestaWalletDescriptorStatus.Registered : FlorestaWalletDescriptorStatus.Failed,
+            failedWallet.DescriptorStatus);
+        Assert.Equal(rescanRejected ? FlorestaWalletRescanStatus.Failed : FlorestaWalletRescanStatus.NotRequested,
+            failedWallet.RescanStatus);
+        while (harness.Tracker.HasDeferredWalletSynchronizations)
+        {
+            Assert.Null(await harness.InitializeAsync());
+            await Task.Delay(10, deadline.Token);
+        }
+        Assert.False(harness.Tracker.HasDeferredWalletSynchronizations);
+        Assert.False(await harness.CachedOutputIsSpentAsync());
+        Assert.Equal(0, harness.HistoryRequests);
+        Assert.Equal(rescanRejected ? 1 : 0, harness.RescanRequests);
+    }
+
+    [Theory]
     [InlineData(false, false, false)]
     [InlineData(false, true, false)]
     [InlineData(true, false, false)]
@@ -941,6 +1033,10 @@ public partial class FlorestaListenerInitializationTests
     [InlineData(true, "ibd-initialization")]
     [InlineData(true, "direct-deferred")]
     [InlineData(true, "direct-partial")]
+    [InlineData(true, "direct-deferred-no-rescan")]
+    [InlineData(true, "direct-partial-no-rescan")]
+    [InlineData(true, "direct-deferred-after-failed-rescan")]
+    [InlineData(true, "direct-partial-after-failed-rescan")]
     [InlineData(true, "requested-reinitialization")]
     [InlineData(true, "stale-removed")]
     [InlineData(true, "stale-mempool")]
@@ -952,15 +1048,24 @@ public partial class FlorestaListenerInitializationTests
         var invoices = new InvoiceDatabase();
         await using var harness = new Harness(invoices: invoices);
         Assert.Equal(90, await harness.InitializeAsync());
+        var autoRescan = !scenario.EndsWith("-no-rescan", StringComparison.Ordinal);
         harness.UpdateSettings(settings =>
         {
             settings.AutoRegisterDescriptors = false;
-            settings.AutoRescanOnNewDescriptor = true;
+            settings.AutoRescanOnNewDescriptor = autoRescan;
         });
         var wallet = new ExtKey().Neuter().ToString(Network.RegTest);
         var addresses = await harness.Tracker.PrepareWalletTrackingAsync(wallet, harness.Token);
         var invoiceId = await harness.CreateInvoiceAsync(addresses[0]);
         harness.UpdateSettings(settings => settings.AutoRegisterDescriptors = true);
+        var afterFailedRescan = scenario.EndsWith("-after-failed-rescan", StringComparison.Ordinal);
+        if (afterFailedRescan)
+        {
+            harness.Rescan = _ => Task.FromResult(Harness.Json(false));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Tracker.TrackWalletAsync(wallet, harness.Token));
+            Assert.Equal(FlorestaWalletRescanStatus.Failed, (await harness.GetWalletAsync(wallet)).RescanStatus);
+            Assert.Equal(FlorestaWalletDescriptorStatus.Registered, (await harness.GetWalletAsync(wallet)).DescriptorStatus);
+        }
         var directImport = scenario.StartsWith("direct-", StringComparison.Ordinal);
         if (!directImport)
         {
@@ -991,10 +1096,12 @@ public partial class FlorestaListenerInitializationTests
             });
             await ctx.SaveChangesAsync(harness.Token);
         }
-        if (scenario == "direct-partial")
+        if (scenario.StartsWith("direct-partial", StringComparison.Ordinal))
             harness.FailedHistoryScripts.Add(addresses[0].Scripthash);
         var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var deferSync = false;
+        if (scenario is "direct-deferred-no-rescan" or "direct-deferred-after-failed-rescan")
+            deferSync = true;
         if (scenario is "rpc-refresh" or "reconnect" or "ibd-initialization" or "direct-deferred")
             harness.Rescan = _ =>
             {
@@ -1027,7 +1134,9 @@ public partial class FlorestaListenerInitializationTests
             await harness.ImportWalletAsync(wallet);
             while (!harness.Tracker.HasDeferredWalletSynchronizations)
                 await Task.Delay(10, deadline.Token);
-            Assert.Equal(FlorestaWalletRescanStatus.Requested, (await harness.GetWalletAsync(wallet)).RescanStatus);
+            Assert.Equal(afterFailedRescan ? FlorestaWalletRescanStatus.Failed :
+                autoRescan ? FlorestaWalletRescanStatus.Requested : FlorestaWalletRescanStatus.NotRequested,
+                (await harness.GetWalletAsync(wallet)).RescanStatus);
             harness.FailedHistoryScripts.Clear();
         }
         else if (scenario == "join-import")
@@ -1149,7 +1258,7 @@ public partial class FlorestaListenerInitializationTests
         Assert.Equal(1, harness.ReceivedPayments);
         Assert.Equal(1, harness.OnChainEvents);
         Assert.Empty(harness.Tracker.RecoveredTransactions);
-        Assert.Equal(1, harness.RescanRequests);
+        Assert.Equal(autoRescan ? 1 : 0, harness.RescanRequests);
     }
 
     [Fact]
@@ -1227,21 +1336,17 @@ public partial class FlorestaListenerInitializationTests
         var contexts = invoices.ContextsCreated;
         for (var pass = 0; pass < 3; pass++)
             Assert.Null(await harness.InitializeAsync());
-        var retried = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        harness.BeforeDescriptorLoad = () =>
-        {
-            retried.TrySetResult();
-            throw new HttpRequestException("descriptor unavailable");
-        };
         await EnvironmentVariableTestHelper.WithBackendReplacementEnvironmentAsync("true", async () =>
         {
-            await harness.Listener.StartAsync(harness.Token);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
+            deadline.CancelAfter(TimeSpan.FromSeconds(5));
             try
             {
-                await retried.Task.WaitAsync(harness.Token);
-                // Observe the quiet loop after its failed recovery attempt,
-                // including work outside InitializeListenerAsync.
-                await Task.Delay(250, harness.Token);
+                // Await the same complete iteration used by RunAsync, including
+                // retained delivery and polling after initialization returns.
+                var descriptorChecks = harness.DescriptorChecks;
+                Assert.Equal(TimeSpan.FromSeconds(10), await harness.Listener.RunIterationAsync(deadline.Token));
+                Assert.True(harness.DescriptorChecks > descriptorChecks);
                 Assert.Equal(contexts, invoices.ContextsCreated);
             }
             finally
@@ -1668,7 +1773,17 @@ public partial class FlorestaListenerInitializationTests
         private readonly DbContextOptions<FlorestaDbContext> _options =
             new DbContextOptionsBuilder<FlorestaDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
 
-        public override FlorestaDbContext CreateContext(Action<NpgsqlDbContextOptionsBuilder>? npgsqlOptionsAction = null) => new(_options);
+        public bool FailNextContext { get; set; }
+
+        public override FlorestaDbContext CreateContext(Action<NpgsqlDbContextOptionsBuilder>? npgsqlOptionsAction = null)
+        {
+            if (FailNextContext)
+            {
+                FailNextContext = false;
+                throw new InvalidOperationException("Wallet database unavailable");
+            }
+            return new(_options);
+        }
     }
 
     private sealed class FixtureExplorerProvider : BTCPayServer.ExplorerClientProvider

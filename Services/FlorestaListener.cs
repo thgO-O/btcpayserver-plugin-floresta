@@ -115,27 +115,8 @@ public class FlorestaListener : IHostedService
         {
             try
             {
-                if (!await IsBitcoinBackendActiveAsync(ct))
-                {
-                    _listenerInitialized = false;
-                    await Task.Delay(TimeSpan.FromSeconds(10), ct);
-                    continue;
-                }
-
-                if (!_electrumClient.IsConnected)
-                {
-                    _listenerInitialized = false;
-                    await Task.Delay(TimeSpan.FromSeconds(1), ct);
-                    continue;
-                }
-
-                var initializedHeight = await InitializeListenerAsync(ct);
-                if (_statusMonitor.IsNetworkCompatible)
-                    await ProcessRecoveredTransactionsAsync(ProcessRecoveredTransactionAsync, ct);
-                if (initializedHeight is not null)
-                    await RequestPaymentPollingAsync(ct);
-
-                await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                var retryDelay = await RunIterationAsync(ct);
+                await Task.Delay(retryDelay, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -148,6 +129,29 @@ public class FlorestaListener : IHostedService
                 try { await Task.Delay(TimeSpan.FromSeconds(10), ct); } catch (OperationCanceledException) { return; }
             }
         }
+    }
+
+    internal async Task<TimeSpan> RunIterationAsync(CancellationToken ct)
+    {
+        if (!await IsBitcoinBackendActiveAsync(ct))
+        {
+            _listenerInitialized = false;
+            return TimeSpan.FromSeconds(10);
+        }
+
+        if (!_electrumClient.IsConnected)
+        {
+            _listenerInitialized = false;
+            return TimeSpan.FromSeconds(1);
+        }
+
+        var initializedHeight = await InitializeListenerAsync(ct);
+        if (_statusMonitor.IsNetworkCompatible)
+            await ProcessRecoveredTransactionsAsync(ProcessRecoveredTransactionAsync, ct);
+        if (initializedHeight is not null)
+            await RequestPaymentPollingAsync(ct);
+
+        return TimeSpan.FromSeconds(10);
     }
 
     internal async Task<int?> InitializeListenerAsync(CancellationToken ct)
