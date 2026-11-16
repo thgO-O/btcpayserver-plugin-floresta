@@ -32,7 +32,7 @@ using Xunit;
 
 namespace BTCPayServer.Plugins.Floresta.Tests;
 
-public class FlorestaListenerInitializationTests
+public partial class FlorestaListenerInitializationTests
 {
     [Theory]
     [InlineData("ibd")]
@@ -1255,8 +1255,8 @@ public class FlorestaListenerInitializationTests
     }
 
     // These tests exercise the actual tracker/listener and RPC/Electrum clients.
-    // The in-memory provider checks orchestration and state transitions, not SQL;
-    // the existing PostgreSQL E2E remains responsible for database fidelity.
+    // Most cases use InMemory for orchestration; the payment persistence cases
+    // supply PostgreSQL for real invoice/payment queries and duplicate handling.
     private sealed class Harness : IAsyncDisposable
     {
         private readonly CancellationTokenSource _timeout = new(TimeSpan.FromSeconds(30));

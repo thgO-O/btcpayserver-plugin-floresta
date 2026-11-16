@@ -41,16 +41,25 @@ Run unit tests:
 dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj --filter "Integration!=Integration&Playwright!=Playwright"
 ```
 
-Run integration tests against a real `florestad` in Docker:
+Run integration tests against a real `florestad` and PostgreSQL in Docker:
 
 ```bash
-docker compose -f docker-compose.integration.yml up -d floresta
+docker compose -f docker-compose.integration.yml --profile full up -d --wait floresta postgres
 
 dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj \
   --filter "Integration=Integration"
 
-docker compose -f docker-compose.integration.yml down -v
+docker compose -f docker-compose.integration.yml --profile full down -v
 ```
+
+The payment persistence regressions reuse the listener fixture with synthetic
+RPC/Electrum and a real PostgreSQL invoice/payment store. They create and drop a
+unique `floresta_payments_*` database per case, apply the pinned host migrations,
+and cover duplicate delivery, ordinary block refresh and polling with conflicting
+transaction-cache rows in another wallet. `E2E_POSTGRES` overrides the connection;
+the default is the disposable Compose PostgreSQL above. The existing database in
+that connection string is never migrated or dropped by these regressions. The
+database user needs permission to create and drop the isolated test databases.
 
 Run the Playwright E2E tests against BTCPay Server, Floresta, bitcoind, and utreexod:
 
@@ -119,6 +128,9 @@ the listener refreshes confirmation state from that wallet's cache; a receipt
 marked removed is recorded as unaccounted rather than settled. The queue is not
 durable across process termination: already cached receipts lost before delivery
 are not replayed, which is distinct from delivering new results found at startup.
+Ordinary payment refresh and polling also read transaction state from the
+invoice's account derivation. A missing derivation or cache entry does not fall
+back to a different wallet's transaction row.
 Pending intent and its start height survive a plugin restart or
 cancellation. Disabling automatic registration or rescan clears it. A successful
 RPC response records `Requested` and stops rescan retries; other rescan errors record
