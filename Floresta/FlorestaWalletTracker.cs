@@ -190,12 +190,10 @@ public class FlorestaWalletTracker : IHostedService
                     _preparedWallets[walletId] = appliedKey;
                 }
                 prepared = true;
-                var recoveryPending = _deferredWalletSynchronizations.ContainsKey(walletId);
                 var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, currentAddresses, ct);
-                // Reconnection or a failed health refresh can switch an active
-                // recovery to full initialization without losing its delivery.
-                if (recoveryPending || _deferredWalletSynchronizations.ContainsKey(walletId))
-                    RecordRecoverySynchronizationResult(walletId, result);
+                // Newly discovered initialization results need delivery even
+                // when restart or a previous complete sync cleared memory debt.
+                RecordRecoverySynchronizationResult(walletId, result);
                 synchronizationDeferred |= result.Deferred;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -293,6 +291,9 @@ public class FlorestaWalletTracker : IHostedService
             RecoveredTransactions.Enqueue(transaction);
         if (!result.Deferred && result.Summary.IsComplete)
             _deferredWalletSynchronizations.TryRemove(walletId, out _);
+        else
+            // The retry path rechecks durable rescan state before syncing.
+            _deferredWalletSynchronizations.TryAdd(walletId, 0);
     }
 
     public async Task TrackWalletAsync(string strategyStr, CancellationToken ct)
@@ -1393,6 +1394,7 @@ public class FlorestaWalletTracker : IHostedService
 
     public class NewTransactionInfo
     {
+        public string WalletId { get; set; }
         public string TxId { get; set; }
         public Transaction Transaction { get; set; }
         public TrackedSource TrackedSource { get; set; }

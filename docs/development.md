@@ -103,8 +103,8 @@ registered. Once the listener is initialized, retries prepare only pending walle
 an unsuccessful import does not reinitialize other wallets or poll all invoices.
 Readiness-check failures also keep the request pending without bypassing wallet
 initialization's deferred-reconciliation guard.
-If the background synchronization after a retry is deferred or incomplete, the
-tracker retains a per-wallet synchronization retry in memory. For an accepted
+If synchronization after an import or recovery retry is deferred or incomplete,
+the tracker retains per-wallet synchronization work in memory. For an accepted
 rescan, later listener passes synchronize only those wallets without preparing
 descriptors again or resubmitting the rescan. Restart uses normal full initialization instead.
 Transactions found by recovery are retained in memory for the listener's existing
@@ -113,10 +113,12 @@ initialization lock. Failed deliveries stay queued for a later pass. This also
 preserves received outputs that are already spent, without polling every invoice
 after an unsuccessful or still-deferred retry. Transactions discovered before a
 later failure within the same address are retained when that sync commits. Full
-initialization in the same process also delivers results for outstanding recovery
-work, including a pending rescan accepted by full initialization as IBD ends.
-The queue is not durable across process termination; restart retains the existing
-full-initialization catch-up.
+initialization delivers newly discovered results even without a memory retry
+marker, including a `Requested` wallet restored after restart. Before delivery,
+the listener refreshes confirmation state from that wallet's cache; a receipt
+marked removed is recorded as unaccounted rather than settled. The queue is not
+durable across process termination: already cached receipts lost before delivery
+are not replayed, which is distinct from delivering new results found at startup.
 Pending intent and its start height survive a plugin restart or
 cancellation. Disabling automatic registration or rescan clears it. A successful
 RPC response records `Requested` and stops rescan retries; other rescan errors record

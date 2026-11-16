@@ -341,8 +341,16 @@ public class FlorestaListener : IHostedService
         var wallet = _walletProvider.GetWallet(network);
         if (wallet == null || _handlers.GetBitcoinHandler(network) == null) return false;
 
+        // A retained receipt may outlive a reorg or history reconciliation.
+        // Use its actual cache owner, not an unrelated wallet with the same txid.
+        if (transaction.WalletId == null) return false;
+        var current = await _tracker.GetTransactionInfoAsync(transaction.WalletId, transaction.TxId, ct);
+        if (current == null) return false;
+        transaction.Confirmations = (int)current.Confirmations;
+        transaction.Height = (int)(current.Height ?? 0);
+
         await ProcessNewTransaction(transaction, network, wallet,
-            PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode), ct);
+            PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode), ct, current);
         return true;
     }
 
@@ -391,7 +399,8 @@ public class FlorestaListener : IHostedService
 
     private async Task ProcessNewTransaction(
         FlorestaWalletTracker.NewTransactionInfo txInfo,
-        BTCPayNetwork network, BTCPayWallet wallet, PaymentMethodId pmi, CancellationToken ct)
+        BTCPayNetwork network, BTCPayWallet wallet, PaymentMethodId pmi, CancellationToken ct,
+        TransactionInformation currentState = null)
     {
         if (txInfo.DerivationStrategy != null)
             wallet.InvalidateCache(txInfo.DerivationStrategy);
@@ -447,7 +456,7 @@ public class FlorestaListener : IHostedService
             }
             else
             {
-                if (await UpdatePaymentStatesForInvoice(network, pmi, invoice, ct))
+                if (await UpdatePaymentStatesForInvoice(network, pmi, invoice, ct, currentState))
                     _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
             }
         }
@@ -681,7 +690,8 @@ public class FlorestaListener : IHostedService
         BTCPayNetwork network,
         PaymentMethodId pmi,
         InvoiceEntity invoice,
-        CancellationToken ct)
+        CancellationToken ct,
+        TransactionInformation currentState = null)
     {
         var wallet = _walletProvider.GetWallet(network);
         if (wallet == null) return false;
@@ -698,16 +708,25 @@ public class FlorestaListener : IHostedService
             if (details == null)
                 continue;
 
-            var tx = await wallet.GetTransactionAsync(details.Outpoint.Hash, cancellation: ct);
-            if (tx == null)
-                continue;
-
             var oldConfirmationCount = details.ConfirmationCount;
             var oldRbf = details.RBF;
             var oldStatus = payment.Status;
 
-            details.ConfirmationCount = ClampConfirmations(tx.Confirmations, network);
-            details.RBF = tx.Transaction?.RBF ?? details.RBF;
+            if (currentState?.TransactionId == details.Outpoint.Hash)
+            {
+                // Repeated delivery must use the same wallet-scoped state as
+                // the first attempt, rather than a global txid lookup.
+                details.ConfirmationCount = ClampConfirmations(currentState.Confirmations, network);
+                details.RBF = currentState.Transaction?.RBF ?? details.RBF;
+            }
+            else
+            {
+                var tx = await wallet.GetTransactionAsync(details.Outpoint.Hash, cancellation: ct);
+                if (tx == null)
+                    continue;
+                details.ConfirmationCount = ClampConfirmations(tx.Confirmations, network);
+                details.RBF = tx.Transaction?.RBF ?? details.RBF;
+            }
             payment.Status = GetPaymentStatus(invoice, details);
 
             if (oldConfirmationCount == details.ConfirmationCount &&

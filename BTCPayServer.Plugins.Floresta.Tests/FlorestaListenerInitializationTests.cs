@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Models;
+using SpeedPolicy = BTCPayServer.Client.Models.SpeedPolicy;
 using BTCPayServer.Data;
 using BTCPayServer.Events;
 using BTCPayServer.HostedServices;
@@ -938,6 +939,13 @@ public class FlorestaListenerInitializationTests
     [InlineData(true, "rpc-refresh")]
     [InlineData(true, "reconnect")]
     [InlineData(true, "ibd-initialization")]
+    [InlineData(true, "direct-deferred")]
+    [InlineData(true, "direct-partial")]
+    [InlineData(true, "requested-reinitialization")]
+    [InlineData(true, "stale-removed")]
+    [InlineData(true, "stale-mempool")]
+    [InlineData(true, "stale-confirmed")]
+    [InlineData(true, "stale-other-wallet")]
     public async Task QuietListenerRecordsRecoveredInvoicePaymentEvenWhenReceiptIsAlreadySpent(
         bool alreadySpent, string scenario)
     {
@@ -953,8 +961,12 @@ public class FlorestaListenerInitializationTests
         var addresses = await harness.Tracker.PrepareWalletTrackingAsync(wallet, harness.Token);
         var invoiceId = await harness.CreateInvoiceAsync(addresses[0]);
         harness.UpdateSettings(settings => settings.AutoRegisterDescriptors = true);
-        harness.BlockchainInfo = _ => Harness.Info(true);
-        await harness.Tracker.TrackWalletAsync(wallet, harness.Token);
+        var directImport = scenario.StartsWith("direct-", StringComparison.Ordinal);
+        if (!directImport)
+        {
+            harness.BlockchainInfo = _ => Harness.Info(true);
+            await harness.Tracker.TrackWalletAsync(wallet, harness.Token);
+        }
         if (scenario == "ibd-initialization")
         {
             // The listener itself observes IBD, so its transition to ready must
@@ -963,9 +975,27 @@ public class FlorestaListenerInitializationTests
             Assert.True(harness.Monitor.IsInitialBlockDownload);
         }
         var transaction = harness.SetRecoveredHistory(addresses[0], alreadySpent);
+        var recoveredHistory = harness.HistoryResponse;
+        if (scenario == "requested-reinitialization")
+            harness.HistoryResponse = _ => Array.Empty<object>();
+        if (scenario == "stale-other-wallet")
+        {
+            await using var ctx = harness.Database.CreateContext();
+            ctx.TrackedWallets.Add(new TrackedWallet { Id = "other-wallet", CryptoCode = "BTC" });
+            ctx.Transactions.Add(new TrackedTransaction
+            {
+                WalletId = "other-wallet", Txid = transaction.GetHash().ToString(),
+                RawTx = transaction.ToBytes(), BlockHeight = 80,
+                SeenAt = DateTimeOffset.UtcNow,
+                RemovedAt = DateTimeOffset.UtcNow
+            });
+            await ctx.SaveChangesAsync(harness.Token);
+        }
+        if (scenario == "direct-partial")
+            harness.FailedHistoryScripts.Add(addresses[0].Scripthash);
         var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var deferSync = false;
-        if (scenario is "rpc-refresh" or "reconnect" or "ibd-initialization")
+        if (scenario is "rpc-refresh" or "reconnect" or "ibd-initialization" or "direct-deferred")
             harness.Rescan = _ =>
             {
                 deferSync = true;
@@ -990,7 +1020,17 @@ public class FlorestaListenerInitializationTests
                     new { tx_hash = unavailableTx, height = 80 }
                 } : Array.Empty<object>();
         }
-        if (scenario == "join-import")
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        if (directImport)
+        {
+            await harness.ImportWalletAsync(wallet);
+            while (!harness.Tracker.HasDeferredWalletSynchronizations)
+                await Task.Delay(10, deadline.Token);
+            Assert.Equal(FlorestaWalletRescanStatus.Requested, (await harness.GetWalletAsync(wallet)).RescanStatus);
+            harness.FailedHistoryScripts.Clear();
+        }
+        else if (scenario == "join-import")
         {
             harness.LoadedDescriptors.Clear();
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1009,8 +1049,6 @@ public class FlorestaListenerInitializationTests
         }
         else
             await harness.InitializeAsync();
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
-        deadline.CancelAfter(TimeSpan.FromSeconds(5));
         if (scenario is "rpc-refresh" or "reconnect" or "ibd-initialization")
         {
             await deferred.Task.WaitAsync(deadline.Token);
@@ -1033,8 +1071,26 @@ public class FlorestaListenerInitializationTests
             if (scenario == "reconnect")
                 Assert.True(harness.Electrum.ConnectionGeneration > generation);
         }
+        if (scenario == "requested-reinitialization")
+        {
+            while (harness.Tracker.HasDeferredWalletSynchronizations)
+                await Task.Delay(10, deadline.Token);
+            Assert.Empty(harness.Tracker.RecoveredTransactions);
+            harness.HistoryResponse = recoveredHistory;
+            await harness.Electrum.DisconnectAsync();
+            await EnvironmentVariableTestHelper.WithBackendReplacementEnvironmentAsync("true", async () =>
+            {
+                await harness.Monitor.RefreshAsync(harness.Token);
+                return true;
+            });
+            Assert.Equal(90, await harness.InitializeAsync());
+        }
         while (harness.Tracker.RecoveredTransactions.IsEmpty)
+        {
+            if (directImport)
+                await harness.InitializeAsync();
             await Task.Delay(10, deadline.Token);
+        }
         if (scenario == "partial-transaction")
         {
             Assert.True(harness.Tracker.HasDeferredWalletSynchronizations);
@@ -1046,36 +1102,109 @@ public class FlorestaListenerInitializationTests
             await harness.InitializeAsync();
             await Task.Delay(10, deadline.Token);
         }
+        var expectedStatus = PaymentStatus.Settled;
+        if (scenario.StartsWith("stale-", StringComparison.Ordinal))
+        {
+            // Retain the discovery snapshot across a failed delivery and a
+            // later wallet sync before the real payment consumer runs.
+            await harness.Listener.ProcessRecoveredTransactionsAsync((_, _) =>
+                Task.FromException<bool>(new IOException("consumer temporarily unavailable")), harness.Token);
+            if (scenario == "stale-removed")
+            {
+                harness.HistoryResponse = _ => Array.Empty<object>();
+                expectedStatus = PaymentStatus.Unaccounted;
+            }
+            else if (scenario == "stale-mempool")
+            {
+                harness.HistoryResponse = script => script == addresses[0].Scripthash
+                    ? new object[] { new { tx_hash = transaction.GetHash().ToString(), height = 0 } }
+                    : Array.Empty<object>();
+                expectedStatus = PaymentStatus.Processing;
+            }
+            Assert.Empty(await harness.Tracker.HandleNewBlockAsync(91, harness.Token));
+        }
+        var current = await harness.Tracker.GetTransactionInfoAsync(wallet, transaction.GetHash().ToString(), harness.Token);
+        Assert.NotNull(current);
+        if (scenario == "stale-other-wallet")
+        {
+            Assert.Equal(-1, (await harness.Tracker.GetTransactionResultAsync(transaction.GetHash().ToString(), harness.Token)).Confirmations);
+            Assert.True(current.Confirmations > 0);
+        }
         await using (var ctx = invoices.CreateContext())
             Assert.Empty(await ctx.Payments.ToListAsync(harness.Token));
 
-        // Start an initialized, quiet listener after recovery: no further block,
-        // notification or reconnect can discover this payment for it.
-        await EnvironmentVariableTestHelper.WithBackendReplacementEnvironmentAsync("true", async () =>
-        {
-            await harness.Listener.StartAsync(harness.Token);
-            try
-            {
-                while (harness.ReceivedPayments == 0 || !harness.Tracker.RecoveredTransactions.IsEmpty)
-                    await Task.Delay(10, deadline.Token);
-            }
-            finally
-            {
-                await harness.Listener.StopAsync(harness.Token);
-            }
-            return true;
-        });
+        // No further block, notification or reconnect can deliver this payment.
+        await harness.RunUntilPaymentAsync();
         await using (var ctx = invoices.CreateContext())
         {
             var payment = Assert.Single(await ctx.Payments.ToListAsync(harness.Token));
             Assert.Equal(invoiceId, payment.InvoiceDataId);
             Assert.Equal(new OutPoint(transaction.GetHash(), 0).ToString(), payment.Id);
             Assert.Equal(0.00001234m, payment.Amount);
+            Assert.Equal(expectedStatus, payment.Status);
         }
+        Assert.NotNull(harness.LastOnChainTransaction);
+        Assert.Equal((long)current.Confirmations, (long)harness.LastOnChainTransaction.Confirmations);
+        Assert.Equal(current.Height, harness.LastOnChainTransaction.Height);
         Assert.Equal(1, harness.ReceivedPayments);
         Assert.Equal(1, harness.OnChainEvents);
         Assert.Empty(harness.Tracker.RecoveredTransactions);
         Assert.Equal(1, harness.RescanRequests);
+    }
+
+    [Fact]
+    public async Task RequestedWalletInitializationDeliversSpentReceiptAfterRestart()
+    {
+        var database = new DatabaseFactory();
+        var invoices = new InvoiceDatabase();
+        string wallet;
+        List<TrackedAddress> addresses;
+        string invoiceId;
+        List<string> descriptors;
+        await using (var first = new Harness(database, invoices))
+        {
+            Assert.Equal(90, await first.InitializeAsync());
+            first.UpdateSettings(s => { s.AutoRegisterDescriptors = false; s.AutoRescanOnNewDescriptor = true; });
+            wallet = new ExtKey().Neuter().ToString(Network.RegTest);
+            addresses = await first.Tracker.PrepareWalletTrackingAsync(wallet, first.Token);
+            invoiceId = await first.CreateInvoiceAsync(addresses[0]);
+            first.UpdateSettings(s => s.AutoRegisterDescriptors = true);
+            first.BlockchainInfo = _ => Harness.Info(true);
+            await first.Tracker.TrackWalletAsync(wallet, first.Token);
+            var defer = false;
+            var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            first.Rescan = _ => { defer = true; return Task.FromResult(Harness.Json(true)); };
+            first.BlockchainInfo = _ =>
+            {
+                if (!defer) return Harness.Info(false);
+                defer = false;
+                deferred.TrySetResult();
+                return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            };
+            await first.InitializeAsync();
+            await deferred.Task.WaitAsync(first.Token);
+            Assert.Equal(FlorestaWalletRescanStatus.Requested, (await first.GetWalletAsync(wallet)).RescanStatus);
+            descriptors = first.LoadedDescriptors.ToList();
+        }
+        // A fresh service graph loses memory debt but shares persisted wallets
+        // and invoices. The receipt is first discovered after this restart.
+        await using var restarted = new Harness(database, invoices);
+        restarted.LoadedDescriptors.UnionWith(descriptors);
+        restarted.UpdateSettings(s => s.AutoRescanOnNewDescriptor = true);
+        var transaction = restarted.SetRecoveredHistory(addresses[0], true);
+        Assert.Equal(90, await restarted.InitializeAsync());
+        Assert.Single(restarted.Tracker.RecoveredTransactions);
+        await restarted.RunUntilPaymentAsync();
+        await using (var ctx = invoices.CreateContext())
+        {
+            var payment = Assert.Single(await ctx.Payments.ToListAsync(restarted.Token));
+            Assert.Equal(invoiceId, payment.InvoiceDataId);
+            Assert.Equal(new OutPoint(transaction.GetHash(), 0).ToString(), payment.Id);
+            Assert.Equal(PaymentStatus.Settled, payment.Status);
+        }
+        Assert.Equal(1, restarted.ReceivedPayments);
+        Assert.Equal(0, restarted.RescanRequests);
+        Assert.False(restarted.Tracker.HasDeferredWalletSynchronizations);
     }
 
     [Fact]
@@ -1149,6 +1278,8 @@ public class FlorestaListenerInitializationTests
         private int _onChainEvents;
         public int ReceivedPayments => Volatile.Read(ref _receivedPayments);
         public int OnChainEvents => Volatile.Read(ref _onChainEvents);
+        public NBXplorer.Models.TransactionResult? LastOnChainTransaction { get; private set; }
+        public DatabaseFactory Database => _database;
         private int _blockchainInfoCalls;
         public Func<int, HttpResponseMessage> BlockchainInfo { get; set; } = _ => Info(false);
         public Func<CancellationToken, Task<HttpResponseMessage>> Rescan { get; set; } = _ => Task.FromResult(Json(true));
@@ -1265,7 +1396,11 @@ public class FlorestaListenerInitializationTests
                     if (evt.Name == InvoiceEvent.ReceivedPayment)
                         Interlocked.Increment(ref _receivedPayments);
                 });
-                _chainEvents = _events.Subscribe<NewOnChainTransactionEvent>(_ => Interlocked.Increment(ref _onChainEvents));
+                _chainEvents = _events.Subscribe<NewOnChainTransactionEvent>(evt =>
+                {
+                    LastOnChainTransaction = evt.NewTransactionEvent.TransactionData;
+                    Interlocked.Increment(ref _onChainEvents);
+                });
             }
             Listener = new FlorestaListener(Electrum, Tracker, Monitor, settingsRepository,
                 wallets!, repository!, _events, payments!, handlers!, networks, NullLogger<FlorestaListener>.Instance);
@@ -1278,6 +1413,7 @@ public class FlorestaListenerInitializationTests
             var invoice = new InvoiceRepository(_invoiceDatabase!, _events).CreateNewInvoice("recovery-store");
             invoice.Currency = "BTC";
             invoice.Price = 0.00001234m;
+            invoice.SpeedPolicy = SpeedPolicy.LowSpeed;
             invoice.InvoiceTime = DateTimeOffset.UtcNow;
             invoice.ExpirationTime = invoice.InvoiceTime.AddHours(1);
             invoice.MonitoringExpiration = invoice.ExpirationTime.AddHours(1);
@@ -1305,6 +1441,30 @@ public class FlorestaListenerInitializationTests
             await ctx.SaveChangesAsync(Token);
             return invoice.Id;
         }
+
+        public Task ImportWalletAsync(string wallet) => EnvironmentVariableTestHelper.WithBackendReplacementEnvironmentAsync(
+            "true", async () =>
+            {
+                using var response = await _walletHttp!.PostAsync(
+                    $"http://floresta.test/v1/cryptos/BTC/derivations/{Uri.EscapeDataString(wallet)}", null, Token);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                return true;
+            });
+
+        public Task RunUntilPaymentAsync() => EnvironmentVariableTestHelper.WithBackendReplacementEnvironmentAsync(
+            "true", async () =>
+            {
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(Token);
+                deadline.CancelAfter(TimeSpan.FromSeconds(5));
+                await Listener.StartAsync(Token);
+                try
+                {
+                    while (ReceivedPayments == 0 || !Tracker.RecoveredTransactions.IsEmpty)
+                        await Task.Delay(10, deadline.Token);
+                }
+                finally { await Listener.StopAsync(Token); }
+                return true;
+            });
 
         public async Task AddCachedWalletAsync()
         {

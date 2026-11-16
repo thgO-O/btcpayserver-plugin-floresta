@@ -513,6 +513,7 @@ internal sealed class FlorestaWalletSync
         var confirmations = FlorestaWalletTracker.GetConfirmations(historyItem.Height, tipHeight);
         var info = new FlorestaWalletTracker.NewTransactionInfo
         {
+            WalletId = triggeringAddress.WalletId,
             TxId = tx.GetHash().ToString(),
             Transaction = tx,
             DerivationStrategy = strategy,
