@@ -114,8 +114,9 @@ preserves received outputs that are already spent, without polling every invoice
 after an unsuccessful or still-deferred retry. Transactions discovered before a
 later failure within the same address are retained when that sync commits. Full
 initialization in the same process also delivers results for outstanding recovery
-work. The queue is not durable across process termination; restart retains the
-existing full-initialization catch-up.
+work, including a pending rescan accepted by full initialization as IBD ends.
+The queue is not durable across process termination; restart retains the existing
+full-initialization catch-up.
 Pending intent and its start height survive a plugin restart or
 cancellation. Disabling automatic registration or rescan clears it. A successful
 RPC response records `Requested` and stops rescan retries; other rescan errors record

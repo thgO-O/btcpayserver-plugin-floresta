@@ -937,6 +937,7 @@ public class FlorestaListenerInitializationTests
     [InlineData(true, "partial-transaction")]
     [InlineData(true, "rpc-refresh")]
     [InlineData(true, "reconnect")]
+    [InlineData(true, "ibd-initialization")]
     public async Task QuietListenerRecordsRecoveredInvoicePaymentEvenWhenReceiptIsAlreadySpent(
         bool alreadySpent, string scenario)
     {
@@ -954,10 +955,17 @@ public class FlorestaListenerInitializationTests
         harness.UpdateSettings(settings => settings.AutoRegisterDescriptors = true);
         harness.BlockchainInfo = _ => Harness.Info(true);
         await harness.Tracker.TrackWalletAsync(wallet, harness.Token);
+        if (scenario == "ibd-initialization")
+        {
+            // The listener itself observes IBD, so its transition to ready must
+            // prepare the rescan through full initialization, not retry-only.
+            Assert.Null(await harness.InitializeAsync());
+            Assert.True(harness.Monitor.IsInitialBlockDownload);
+        }
         var transaction = harness.SetRecoveredHistory(addresses[0], alreadySpent);
         var deferred = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var deferSync = false;
-        if (scenario is "rpc-refresh" or "reconnect")
+        if (scenario is "rpc-refresh" or "reconnect" or "ibd-initialization")
             harness.Rescan = _ =>
             {
                 deferSync = true;
@@ -1003,10 +1011,11 @@ public class FlorestaListenerInitializationTests
             await harness.InitializeAsync();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
-        if (scenario is "rpc-refresh" or "reconnect")
+        if (scenario is "rpc-refresh" or "reconnect" or "ibd-initialization")
         {
             await deferred.Task.WaitAsync(deadline.Token);
-            Assert.True(harness.Tracker.HasDeferredWalletSynchronizations);
+            if (scenario != "ibd-initialization")
+                Assert.True(harness.Tracker.HasDeferredWalletSynchronizations);
             Assert.Empty(harness.Tracker.RecoveredTransactions);
             var generation = harness.Electrum.ConnectionGeneration;
             if (scenario == "rpc-refresh")
@@ -1016,7 +1025,7 @@ public class FlorestaListenerInitializationTests
                 Assert.False(harness.Monitor.IsNetworkCompatible);
                 harness.BlockchainInfo = _ => Harness.Info(false);
             }
-            else
+            else if (scenario == "reconnect")
                 await harness.Electrum.DisconnectAsync();
             // The same process still owes recovery delivery even though the
             // next listener pass takes the full-initialization path.

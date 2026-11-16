@@ -131,7 +131,7 @@ public class FlorestaWalletTracker : IHostedService
 
     public async Task<bool> InitializeAsync(CancellationToken ct, bool isInitialBlockDownload = false)
     {
-        List<(string walletId, List<TrackedAddress> addresses)> walletsToSubscribe;
+        List<(string walletId, List<TrackedAddress> addresses, string rescanStatus)> walletsToSubscribe;
         await using (var ctx = _dbFactory.CreateContext())
         {
             var tipState = await ctx.SyncStates.FindAsync(new object[] { "tip_height" }, ct);
@@ -151,7 +151,7 @@ public class FlorestaWalletTracker : IHostedService
                 }
 
                 var addresses = await GetTrackedAddressSourcesAsync(ctx, wallet.Id, ct);
-                walletsToSubscribe.Add((wallet.Id, addresses));
+                walletsToSubscribe.Add((wallet.Id, addresses, wallet.RescanStatus));
             }
 
             _logger.LogInformation("Loaded {Count} tracked wallets from DB", wallets.Count);
@@ -162,8 +162,12 @@ public class FlorestaWalletTracker : IHostedService
         var synchronizationDeferred = isInitialBlockDownload;
         var settings = await GetSettingsAsync();
         var preparationKey = CreatePreparationKey(_client.ConnectionGeneration, settings);
-        foreach (var (walletId, addresses) in walletsToSubscribe)
+        foreach (var (walletId, addresses, rescanStatus) in walletsToSubscribe)
         {
+            // Full initialization can accept a pending rescan as IBD ends, so
+            // retain its recovery intent before preparation starts.
+            if (rescanStatus == FlorestaWalletRescanStatus.Pending)
+                _deferredWalletSynchronizations.TryAdd(walletId, 0);
             var prepared = false;
             try
             {
