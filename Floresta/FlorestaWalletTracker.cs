@@ -254,9 +254,10 @@ public class FlorestaWalletTracker : IHostedService
                     var wallet = await ctx.TrackedWallets.FindAsync(new object[] { walletId }, ct);
                     if (wallet?.RescanStatus == FlorestaWalletRescanStatus.Pending)
                         continue;
+                    var authorizedGeneration = _walletPreparationFailures.GetValueOrDefault(walletId);
                     var preparedSynchronization =
                         _deferredWalletSynchronizations.TryGetValue(walletId, out var generation) &&
-                        generation == _walletPreparationFailures.GetValueOrDefault(walletId) &&
+                        generation == authorizedGeneration &&
                         wallet?.DescriptorStatus != FlorestaWalletDescriptorStatus.Failed;
                     if (wallet == null ||
                         (wallet.RescanStatus != FlorestaWalletRescanStatus.Requested && !preparedSynchronization))
@@ -268,7 +269,7 @@ public class FlorestaWalletTracker : IHostedService
                     // An import must never join a sync-only job and skip its
                     // descriptor preparation. The listener awaits this sync.
                     await SubscribeAndSyncWalletCoreAsync(walletId,
-                        await GetTrackedAddressesAsync(walletId, ct), ct);
+                        await GetTrackedAddressesAsync(walletId, ct), ct, authorizedGeneration);
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -283,17 +284,31 @@ public class FlorestaWalletTracker : IHostedService
     }
 
     private async Task SubscribeAndSyncWalletCoreAsync(
-        string walletId, List<TrackedAddress> addresses, CancellationToken ct)
+        string walletId, List<TrackedAddress> addresses, CancellationToken ct, long? authorizedGeneration = null)
     {
         // Sync-only retries wait until tracking jobs finish. Restart recovers
         // through normal full initialization rather than persisting this set.
-        var failureGeneration = _walletPreparationFailures.GetValueOrDefault(walletId);
+        var failureGeneration = authorizedGeneration ?? _walletPreparationFailures.GetValueOrDefault(walletId);
         await _walletSync.SubscribeTrackedAddressesAsync(addresses, ct);
-        var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, addresses, ct);
+        FlorestaWalletSync.WalletSyncResult result;
+        try
+        {
+            result = await _walletSync.SyncWalletStateWithResultAsync(walletId, addresses, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            RecordRecoverySynchronizationResult(walletId,
+                new(new(), new(0, 0, addresses.Count), Deferred: true), failureGeneration);
+            throw;
+        }
         RecordRecoverySynchronizationResult(walletId, result, failureGeneration);
     }
 
-    private void RecordRecoverySynchronizationResult(
+    internal void RecordRecoverySynchronizationResult(
         string walletId, FlorestaWalletSync.WalletSyncResult result, long failureGeneration)
     {
         // The cache now knows these txids, so later syncs will not rediscover
@@ -301,11 +316,18 @@ public class FlorestaWalletTracker : IHostedService
         foreach (var transaction in result.NewTransactions)
             RecoveredTransactions.Enqueue(transaction);
         if (!result.Deferred && result.Summary.IsComplete)
-            _deferredWalletSynchronizations.TryRemove(walletId, out _);
+        {
+            if (_deferredWalletSynchronizations.TryGetValue(walletId, out var recorded) &&
+                (!recorded.HasValue || recorded.Value <= failureGeneration))
+                _deferredWalletSynchronizations.TryRemove(new KeyValuePair<string, long?>(walletId, recorded));
+        }
         else
             // This sync was reached after preparation. It remains retryable
             // even if no automatic rescan was requested.
-            _deferredWalletSynchronizations[walletId] = failureGeneration;
+            _deferredWalletSynchronizations.AddOrUpdate(walletId, failureGeneration,
+                (_, recorded) => recorded.HasValue && recorded.Value > failureGeneration
+                    ? recorded
+                    : failureGeneration);
     }
 
     public async Task TrackWalletAsync(string strategyStr, CancellationToken ct)

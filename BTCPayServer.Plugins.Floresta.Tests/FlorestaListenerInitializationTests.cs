@@ -1344,6 +1344,7 @@ public partial class FlorestaListenerInitializationTests
             {
                 // Await the same complete iteration used by RunAsync, including
                 // retained delivery and polling after initialization returns.
+                await WaitForTrackingCleanupAsync(harness.Tracker, deadline.Token);
                 var descriptorChecks = harness.DescriptorChecks;
                 Assert.Equal(TimeSpan.FromSeconds(10), await harness.Listener.RunIterationAsync(deadline.Token));
                 Assert.True(harness.DescriptorChecks > descriptorChecks);
@@ -1774,9 +1775,11 @@ public partial class FlorestaListenerInitializationTests
             new DbContextOptionsBuilder<FlorestaDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
 
         public bool FailNextContext { get; set; }
+        public Action? BeforeCreateContext { get; set; }
 
         public override FlorestaDbContext CreateContext(Action<NpgsqlDbContextOptionsBuilder>? npgsqlOptionsAction = null)
         {
+            BeforeCreateContext?.Invoke();
             if (FailNextContext)
             {
                 FailNextContext = false;
