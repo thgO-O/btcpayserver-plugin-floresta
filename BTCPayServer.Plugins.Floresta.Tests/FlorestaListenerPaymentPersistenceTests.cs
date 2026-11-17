@@ -57,15 +57,15 @@ public partial class FlorestaListenerInitializationTests
         }
         harness.UpdateSettings(s => s.AutoRegisterDescriptors = true);
         await harness.Tracker.TrackWalletAsync(wallet, harness.Token);
-        Assert.Single(harness.Tracker.RecoveredTransactions);
+        Assert.Single(harness.Tracker.PendingTransactions);
         if (flow != "polling")
         {
-            await harness.Listener.ProcessRecoveredTransactionsAsync(async (receipt, ct) =>
+            await harness.Listener.ProcessPendingTransactionsAsync(async (receipt, ct) =>
             {
-                Assert.True(await harness.Listener.ProcessRecoveredTransactionAsync(receipt, ct));
+                Assert.Equal(ReceiptDeliveryResult.Delivered, await harness.Listener.ProcessPendingTransactionAsync(receipt, ct));
                 // A write can succeed before delivery is acknowledged. Retain the
                 // same receipt so the next attempt reaches AddPayment's duplicate path.
-                return flow != "repeat";
+                return flow != "repeat" ? ReceiptDeliveryResult.Delivered : ReceiptDeliveryResult.Retry;
             }, harness.Token);
             await AssertPaymentAsync(PaymentStatus.Settled);
         }
@@ -102,8 +102,8 @@ public partial class FlorestaListenerInitializationTests
         {
             await EnvironmentVariableTestHelper.WithBackendReplacementEnvironmentAsync("true", async () =>
             {
-                await harness.Listener.ProcessRecoveredTransactionsAsync(
-                    harness.Listener.ProcessRecoveredTransactionAsync, harness.Token);
+                await harness.Listener.ProcessPendingTransactionsAsync(
+                    harness.Listener.ProcessPendingTransactionAsync, harness.Token);
                 return true;
             });
             Assert.Equal(current.Confirmations, (long)harness.LastOnChainTransaction!.Confirmations);
@@ -128,14 +128,14 @@ public partial class FlorestaListenerInitializationTests
                 await AssertPaymentAsync(expected);
                 // Polling can win the race with retained delivery. The latter
                 // must remain idempotent and must not publish ReceivedPayment again.
-                await harness.Listener.ProcessRecoveredTransactionsAsync(
-                    harness.Listener.ProcessRecoveredTransactionAsync, harness.Token);
+                await harness.Listener.ProcessPendingTransactionsAsync(
+                    harness.Listener.ProcessPendingTransactionAsync, harness.Token);
             }
         }
         await AssertPaymentAsync(expected);
         Assert.Equal(1, harness.ReceivedPayments);
         Assert.Equal(flow == "repeat" ? 2 : 1, harness.OnChainEvents);
-        Assert.Empty(harness.Tracker.RecoveredTransactions);
+        Assert.Empty(harness.Tracker.PendingTransactions);
         Assert.Equal(1, harness.RescanRequests);
 
         async Task AssertPaymentAsync(PaymentStatus expected)

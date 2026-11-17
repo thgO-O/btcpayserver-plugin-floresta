@@ -38,6 +38,7 @@ internal sealed class FlorestaWalletSync
     private readonly Func<int> _getTipHeight;
     private readonly Network _network;
     private readonly ILogger _logger;
+    private readonly FlorestaReceiptQueue _receipts;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _walletLocks = new();
 
     public FlorestaWalletSync(
@@ -49,7 +50,8 @@ internal sealed class FlorestaWalletSync
         ConcurrentDictionary<string, DerivationStrategyBase> trackedStrategies,
         Func<int> getTipHeight,
         Network network,
-        ILogger logger)
+        ILogger logger,
+        FlorestaReceiptQueue receipts)
     {
         _dbFactory = dbFactory;
         _client = client;
@@ -60,6 +62,7 @@ internal sealed class FlorestaWalletSync
         _getTipHeight = getTipHeight;
         _network = network;
         _logger = logger;
+        _receipts = receipts;
     }
 
     public async Task SubscribeTrackedAddressesAsync(IEnumerable<TrackedAddress> addresses, CancellationToken ct)
@@ -325,6 +328,9 @@ internal sealed class FlorestaWalletSync
         }
 
         await ctx.SaveChangesAsync(ct);
+        // The cache now knows these txids. Hand off their receipts before any
+        // cancellable post-commit work, independently of the synchronization trigger.
+        _receipts.Enqueue(newTxs);
         await SubscribeTrackedAddressesAsync(addressesToSubscribe, ct);
         return new WalletSyncResult(newTxs, summary);
     }

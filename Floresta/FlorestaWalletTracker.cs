@@ -65,7 +65,7 @@ public class FlorestaWalletTracker : IHostedService
     // started before any later preparation failure invalidated its readiness.
     private readonly ConcurrentDictionary<string, long?> _deferredWalletSynchronizations = new();
     private readonly ConcurrentDictionary<string, long> _walletPreparationFailures = new();
-    internal ConcurrentQueue<NewTransactionInfo> RecoveredTransactions { get; } = new();
+    internal FlorestaReceiptQueue PendingTransactions { get; } = new();
     private Network _network;
     private DerivationStrategyFactory _derivationFactory;
     private int _tipHeight;
@@ -107,7 +107,8 @@ public class FlorestaWalletTracker : IHostedService
             _trackedStrategies,
             () => Volatile.Read(ref _tipHeight),
             _network,
-            _logger);
+            _logger,
+            PendingTransactions);
         _broadcaster = new FlorestaTransactionBroadcaster(_rpcClient, _client);
     }
 
@@ -195,8 +196,6 @@ public class FlorestaWalletTracker : IHostedService
                 }
                 prepared = true;
                 var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, currentAddresses, ct);
-                // Newly discovered initialization results need delivery even
-                // when restart or a previous complete sync cleared memory debt.
                 RecordRecoverySynchronizationResult(walletId, result, failureGeneration);
                 synchronizationDeferred |= result.Deferred;
             }
@@ -311,10 +310,8 @@ public class FlorestaWalletTracker : IHostedService
     internal void RecordRecoverySynchronizationResult(
         string walletId, FlorestaWalletSync.WalletSyncResult result, long failureGeneration)
     {
-        // The cache now knows these txids, so later syncs will not rediscover
-        // them. Keep the complete transaction until the listener processes it.
-        foreach (var transaction in result.NewTransactions)
-            RecoveredTransactions.Enqueue(transaction);
+        // Receipt handoff belongs to the cache commit boundary in WalletSync.
+        // This method owns only the wallet's synchronization retry state.
         if (!result.Deferred && result.Summary.IsComplete)
         {
             if (_deferredWalletSynchronizations.TryGetValue(walletId, out var recorded) &&

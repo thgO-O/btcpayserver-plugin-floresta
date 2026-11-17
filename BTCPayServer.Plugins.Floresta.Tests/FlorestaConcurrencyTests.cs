@@ -29,7 +29,7 @@ public class FlorestaConcurrencyTests
             new ConcurrentDictionary<string, DerivationStrategyBase>(),
             () => 0,
             Network.RegTest,
-            NullLogger.Instance);
+            NullLogger.Instance, new FlorestaReceiptQueue());
         var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var secondEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -56,7 +56,9 @@ The payment persistence regressions reuse the listener fixture with synthetic
 RPC/Electrum and a real PostgreSQL invoice/payment store. They create and drop a
 unique `floresta_payments_*` database per case, apply the pinned host migrations,
 and cover duplicate delivery, ordinary block refresh and polling with conflicting
-transaction-cache rows in another wallet. `E2E_POSTGRES` overrides the connection;
+transaction-cache rows in another wallet. Delivery contract cases also cover
+block and wallet-scan producers, retrying a spent receipt through the real payment
+store without an unspent-output fallback. `E2E_POSTGRES` overrides the connection;
 the default is the disposable Compose PostgreSQL above. The existing database in
 that connection string is never migrated or dropped by these regressions. The
 database user needs permission to create and drop the isolated test databases.
@@ -124,18 +126,31 @@ An old persisted rescan failure does not block a later successful import.
 Later listener passes synchronize
 only eligible wallets without preparing descriptors again or requesting another
 rescan. Restart uses normal full initialization instead.
-Transactions found by recovery are retained in memory for the listener's existing
-loop to deliver through normal transaction/payment processing, outside the
-initialization lock. Failed deliveries stay queued for a later pass. This also
-preserves received outputs that are already spent, without polling every invoice
-after an unsuccessful or still-deferred retry. Transactions discovered before a
-later failure within the same address are retained when that sync commits. Full
-initialization delivers newly discovered results even without a memory retry
-marker, including a `Requested` wallet restored after restart. Before delivery,
-the listener refreshes confirmation state from that wallet's cache; a receipt
-marked removed is recorded as unaccounted rather than settled. The queue is not
-durable across process termination: already cached receipts lost before delivery
-are not replayed, which is distinct from delivering new results found at startup.
+Each wallet synchronization hands newly discovered transaction receipts to one
+process-local delivery queue immediately after its cache commit, before awaiting
+post-commit subscriptions. Initialization, import, block and scripthash updates,
+reconnect catch-up, wallet UTXO scans and address-source tracking share that
+handoff. A failure later in a batch or cancellation during subscription cannot
+erase ownership of an already committed receipt. Node-only administrative
+descriptor registration and rescan commands keep their existing semantics; they
+do not themselves synchronize the plugin's wallet cache.
+The listener drains the queue through normal transaction/payment processing.
+Periodic and event-driven passes share one serialized consumer, outside the
+initialization lock. Delivery explicitly returns `Delivered`, `Retry`, or
+`Discard`: transient failures rotate for a later pass, while a missing cache row
+after an explicit wallet wipe is discarded. Rediscovery can enqueue a fresh
+receipt. An invoice payment write is acknowledged only when it is persisted or
+already present; a null result from the host payment service alone is insufficient.
+Delivery is at least once within the process; invoice outpoints prevent duplicate
+payment rows. This also preserves received outputs that are already spent,
+without relying on the unspent-output polling fallback. Address-only sources
+keep their on-chain event behavior and do not become derivation-based invoices.
+Before delivery, the listener refreshes confirmation state from the receipt's
+wallet cache; a receipt marked removed is recorded as unaccounted rather than
+settled. The queue is not durable across process termination: already cached
+receipts lost before delivery are not replayed, which is distinct from delivering
+new results found at startup. No rescan-readiness or preparation-generation rule
+is changed by this delivery handoff.
 Ordinary payment refresh and polling also read transaction state from the
 invoice's account derivation. A missing derivation or cache entry does not fall
 back to a different wallet's transaction row.
