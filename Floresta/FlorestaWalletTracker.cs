@@ -61,6 +61,11 @@ public class FlorestaWalletTracker : IHostedService
     private readonly ConcurrentDictionary<string, TaskCompletionSource<Exception>> _trackingPreparations = new();
     private readonly ConcurrentDictionary<string, WalletPreparationFlight> _walletPreparations = new();
     private readonly ConcurrentDictionary<string, WalletPreparationKey> _preparedWallets = new();
+    // Null reserves pending preparation; a generation identifies synchronization
+    // started before any later preparation failure invalidated its readiness.
+    private readonly ConcurrentDictionary<string, long?> _deferredWalletSynchronizations = new();
+    private readonly ConcurrentDictionary<string, long> _walletPreparationFailures = new();
+    internal ConcurrentQueue<NewTransactionInfo> RecoveredTransactions { get; } = new();
     private Network _network;
     private DerivationStrategyFactory _derivationFactory;
     private int _tipHeight;
@@ -129,7 +134,7 @@ public class FlorestaWalletTracker : IHostedService
 
     public async Task<bool> InitializeAsync(CancellationToken ct, bool isInitialBlockDownload = false)
     {
-        List<(string walletId, List<TrackedAddress> addresses)> walletsToSubscribe;
+        List<(string walletId, List<TrackedAddress> addresses, string rescanStatus)> walletsToSubscribe;
         await using (var ctx = _dbFactory.CreateContext())
         {
             var tipState = await ctx.SyncStates.FindAsync(new object[] { "tip_height" }, ct);
@@ -149,7 +154,7 @@ public class FlorestaWalletTracker : IHostedService
                 }
 
                 var addresses = await GetTrackedAddressSourcesAsync(ctx, wallet.Id, ct);
-                walletsToSubscribe.Add((wallet.Id, addresses));
+                walletsToSubscribe.Add((wallet.Id, addresses, wallet.RescanStatus));
             }
 
             _logger.LogInformation("Loaded {Count} tracked wallets from DB", wallets.Count);
@@ -160,9 +165,14 @@ public class FlorestaWalletTracker : IHostedService
         var synchronizationDeferred = isInitialBlockDownload;
         var settings = await GetSettingsAsync();
         var preparationKey = CreatePreparationKey(_client.ConnectionGeneration, settings);
-        foreach (var (walletId, addresses) in walletsToSubscribe)
+        foreach (var (walletId, addresses, rescanStatus) in walletsToSubscribe)
         {
+            // Full initialization can accept a pending rescan as IBD ends, so
+            // retain its recovery intent before preparation starts.
+            if (rescanStatus == FlorestaWalletRescanStatus.Pending)
+                _deferredWalletSynchronizations.TryAdd(walletId, null);
             var prepared = false;
+            var failureGeneration = _walletPreparationFailures.GetValueOrDefault(walletId);
             try
             {
                 var currentAddresses = addresses;
@@ -184,7 +194,9 @@ public class FlorestaWalletTracker : IHostedService
                     _preparedWallets[walletId] = appliedKey;
                 }
                 prepared = true;
-                var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, currentAddresses, ct);
+                var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, currentAddresses, ct,
+                    onCommitted: EnqueueCommittedRecoveryTransactions);
+                RecordRecoverySynchronizationResult(walletId, result, failureGeneration);
                 synchronizationDeferred |= result.Deferred;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -201,6 +213,125 @@ public class FlorestaWalletTracker : IHostedService
 
         _logger.LogInformation("Initialized {Count} tracked wallets", walletsToSubscribe.Count);
         return synchronizationDeferred;
+    }
+
+    internal async Task<bool> HasPendingDescriptorRescansAsync(CancellationToken ct)
+    {
+        await using var ctx = _dbFactory.CreateContext();
+        return await ctx.TrackedWallets.AnyAsync(
+            wallet => wallet.RescanStatus == FlorestaWalletRescanStatus.Pending, ct);
+    }
+
+    internal bool HasDeferredWalletSynchronizations => !_deferredWalletSynchronizations.IsEmpty;
+
+    internal async Task RetryPendingWalletsAsync(CancellationToken ct)
+    {
+        HashSet<string> pendingRescans;
+        await using (var ctx = _dbFactory.CreateContext())
+        {
+            pendingRescans = await ctx.TrackedWallets
+                .Where(wallet => wallet.RescanStatus == FlorestaWalletRescanStatus.Pending)
+                .Select(wallet => wallet.Id).ToHashSetAsync(ct);
+        }
+
+        foreach (var walletId in pendingRescans.Union(_deferredWalletSynchronizations.Keys))
+        {
+            try
+            {
+                // A retry can join an import job whose sync cannot report Deferred.
+                _deferredWalletSynchronizations.TryAdd(walletId, null);
+                if (pendingRescans.Contains(walletId))
+                {
+                    await PrepareAndStartTrackingAsync(walletId,
+                        token => PrepareWalletTrackingAsync(walletId, token),
+                        (addresses, token) => SubscribeAndSyncWalletCoreAsync(walletId, addresses, token),
+                        ct);
+                }
+                else if (!_trackingPreparations.ContainsKey(walletId))
+                {
+                    await using var ctx = _dbFactory.CreateContext();
+                    var wallet = await ctx.TrackedWallets.FindAsync(new object[] { walletId }, ct);
+                    if (wallet?.RescanStatus == FlorestaWalletRescanStatus.Pending)
+                        continue;
+                    var authorizedGeneration = _walletPreparationFailures.GetValueOrDefault(walletId);
+                    var preparedSynchronization =
+                        _deferredWalletSynchronizations.TryGetValue(walletId, out var generation) &&
+                        generation == authorizedGeneration &&
+                        wallet?.DescriptorStatus != FlorestaWalletDescriptorStatus.Failed;
+                    if (wallet == null ||
+                        (wallet.RescanStatus != FlorestaWalletRescanStatus.Requested && !preparedSynchronization))
+                    {
+                        _deferredWalletSynchronizations.TryRemove(walletId, out _);
+                        continue;
+                    }
+
+                    // An import must never join a sync-only job and skip its
+                    // descriptor preparation. The listener awaits this sync.
+                    await SubscribeAndSyncWalletCoreAsync(walletId,
+                        await GetTrackedAddressesAsync(walletId, ct), ct, authorizedGeneration);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to retry wallet recovery for wallet {WalletId}", LogSafeId.Hash(walletId));
+            }
+        }
+    }
+
+    private async Task SubscribeAndSyncWalletCoreAsync(
+        string walletId, List<TrackedAddress> addresses, CancellationToken ct, long? authorizedGeneration = null)
+    {
+        // Sync-only retries wait until tracking jobs finish. Restart recovers
+        // through normal full initialization rather than persisting this set.
+        var failureGeneration = authorizedGeneration ?? _walletPreparationFailures.GetValueOrDefault(walletId);
+        await _walletSync.SubscribeTrackedAddressesAsync(addresses, ct);
+        FlorestaWalletSync.WalletSyncResult result;
+        try
+        {
+            result = await _walletSync.SyncWalletStateWithResultAsync(walletId, addresses, ct,
+                onCommitted: EnqueueCommittedRecoveryTransactions);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            RecordRecoverySynchronizationResult(walletId,
+                new(new(), new(0, 0, addresses.Count), Deferred: true), failureGeneration);
+            throw;
+        }
+        RecordRecoverySynchronizationResult(walletId, result, failureGeneration);
+    }
+
+    private void EnqueueCommittedRecoveryTransactions(FlorestaWalletSync.WalletSyncResult result)
+    {
+        // The cache now knows these txids, so later syncs will not rediscover
+        // them. Keep the complete transaction until the listener processes it.
+        foreach (var transaction in result.NewTransactions)
+            RecoveredTransactions.Enqueue(transaction);
+    }
+
+    internal void RecordRecoverySynchronizationResult(
+        string walletId, FlorestaWalletSync.WalletSyncResult result, long failureGeneration)
+    {
+        if (!result.Deferred && result.Summary.IsComplete)
+        {
+            if (_deferredWalletSynchronizations.TryGetValue(walletId, out var recorded) &&
+                (!recorded.HasValue || recorded.Value <= failureGeneration))
+                _deferredWalletSynchronizations.TryRemove(new KeyValuePair<string, long?>(walletId, recorded));
+        }
+        else
+            // This sync was reached after preparation. It remains retryable
+            // even if no automatic rescan was requested.
+            _deferredWalletSynchronizations.AddOrUpdate(walletId, failureGeneration,
+                (_, recorded) => recorded.HasValue && recorded.Value > failureGeneration
+                    ? recorded
+                    : failureGeneration);
     }
 
     public async Task TrackWalletAsync(string strategyStr, CancellationToken ct)
@@ -222,27 +353,45 @@ public class FlorestaWalletTracker : IHostedService
         string strategyStr, CancellationToken ct)
     {
         var preparation = await PrepareWalletAsync(strategyStr, ct);
+        try
+        {
+            // Phase 1: derive addresses locally (fast, no network)
+            var addresses = await _addressPool.EnsureAddressesDerivedAsync(
+                strategyStr,
+                preparation.Settings,
+                preparation.DescriptorRegistration,
+                preparation.DescriptorRegisteredAt,
+                null,
+                ct);
+            if (addresses == null)
+                addresses = await GetTrackedAddressesAsync(strategyStr, ct);
 
-        // Phase 1: derive addresses locally (fast, no network)
-        var addresses = await _addressPool.EnsureAddressesDerivedAsync(
-            strategyStr,
-            preparation.Settings,
-            preparation.DescriptorRegistration,
-            preparation.DescriptorRegisteredAt,
-            null,
-            ct);
-        if (addresses == null)
-            addresses = await GetTrackedAddressesAsync(strategyStr, ct);
-
-        return (addresses, preparation.Settings);
+            return (addresses, preparation.Settings);
+        }
+        catch
+        {
+            // Address derivation is also part of successful preparation.
+            _walletPreparationFailures.AddOrUpdate(strategyStr, 1, (_, generation) => generation + 1);
+            throw;
+        }
     }
 
-    private Task<WalletPreparationContext> PrepareWalletAsync(string strategyStr, CancellationToken ct)
+    private async Task<WalletPreparationContext> PrepareWalletAsync(string strategyStr, CancellationToken ct)
     {
-        return GetOrStartWalletPreparationAsync(
-            strategyStr,
-            token => PrepareWalletCoreAsync(strategyStr, token),
-            ct);
+        try
+        {
+            return await GetOrStartWalletPreparationAsync(
+                strategyStr,
+                token => PrepareWalletCoreAsync(strategyStr, token),
+                ct);
+        }
+        catch
+        {
+            // Import and scan preparation can both invalidate earlier sync-only
+            // debt, including failures before failed metadata can be saved.
+            _walletPreparationFailures.AddOrUpdate(strategyStr, 1, (_, generation) => generation + 1);
+            throw;
+        }
     }
 
     internal async Task<WalletPreparationContext> GetOrStartWalletPreparationAsync(
@@ -284,7 +433,9 @@ public class FlorestaWalletTracker : IHostedService
         if (!descriptorRegistration.Succeeded)
         {
             await UpsertWalletDescriptorMetadataAsync(strategyStr, settings, descriptorRegistration, null,
-                descriptorRegistration.Error, ct, FlorestaWalletDescriptorMetadata.ApplyRescanNotRequested);
+                descriptorRegistration.Error, ct,
+                !settings.AutoRegisterDescriptors || !settings.AutoRescanOnNewDescriptor
+                    ? FlorestaWalletDescriptorMetadata.ApplyRescanNotRequested : null);
             throw new InvalidOperationException($"Floresta descriptor registration failed: {descriptorRegistration.Error}");
         }
 
@@ -411,8 +562,8 @@ public class FlorestaWalletTracker : IHostedService
     {
         addresses ??= await GetTrackedAddressesAsync(strategyStr, ct);
 
-        await _walletSync.SubscribeTrackedAddressesAsync(addresses, ct);
-        await _walletSync.SyncWalletStateAsync(strategyStr, addresses, ct);
+        // A recovery retry may share this import's tracking job.
+        await SubscribeAndSyncWalletCoreAsync(strategyStr, addresses, ct);
         _logger.LogInformation("Now tracking wallet {WalletId}", LogSafeId.Hash(strategyStr));
     }
 
@@ -609,7 +760,12 @@ public class FlorestaWalletTracker : IHostedService
         CancellationToken ct)
     {
         if (settings.AutoRegisterDescriptors)
-            return await _descriptorRegistry.RegisterAsync(settings.CryptoCode ?? "BTC", strategyStr, ct);
+            return await _descriptorRegistry.RegisterAsync(settings.CryptoCode ?? "BTC", strategyStr, ct,
+                settings.AutoRescanOnNewDescriptor
+                    ? token => UpdateWalletRescanStateAsync(strategyStr, settings,
+                        (wallet, now) => FlorestaWalletDescriptorMetadata.ApplyRescanPending(
+                            wallet, settings.DefaultRescanStartHeight, now), token)
+                    : null);
 
         return new FlorestaDescriptorRegistrationResult(
             _descriptorService.CreateDescriptors(settings.CryptoCode ?? "BTC", strategyStr),
@@ -635,21 +791,52 @@ public class FlorestaWalletTracker : IHostedService
             return;
         }
 
-        if (descriptorRegistration.Registered == 0)
-            return;
+        int? startHeight;
+        await using (var ctx = _dbFactory.CreateContext())
+        {
+            var wallet = await ctx.TrackedWallets.FindAsync(new object[] { strategyStr }, ct);
+            if (wallet?.RescanStatus != FlorestaWalletRescanStatus.Pending)
+                return;
+            startHeight = wallet.RescanStartHeight;
+        }
 
+        // Keep the durable intent while IBD or an unavailable readiness RPC prevents
+        // a request. Registration may already have completed on a previous process.
         try
         {
-            await _rpcClient.RescanBlockchainAsync(
-                settings.DefaultRescanStartHeight,
-                null,
-                false,
-                "medium",
-                ct);
+            if (FlorestaChainInfoParser.Parse(await _rpcClient.GetBlockchainInfoAsync(ct)).IsInitialBlockDownload != false)
+                return;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Floresta descriptor rescan deferred because node readiness could not be checked");
+            return;
+        }
+
+        try
+        {
+            var result = await _rpcClient.RescanBlockchainAsync(
+                startHeight,
+                null,
+                false,
+                "medium",
+                ct);
+            if (result.ValueKind != System.Text.Json.JsonValueKind.True)
+                throw new InvalidOperationException("Floresta did not accept the descriptor rescan.");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (FlorestaRpcException ex) when (ex.Code == -32093)
+        {
+            // IBD can restart between the readiness check and rescanblockchain.
+            _logger.LogInformation("Floresta descriptor rescan deferred during initial block download");
+            return;
         }
         catch (Exception ex)
         {
@@ -658,7 +845,7 @@ public class FlorestaWalletTracker : IHostedService
                 settings,
                 (wallet, now) => FlorestaWalletDescriptorMetadata.ApplyRescanFailed(
                     wallet,
-                    settings.DefaultRescanStartHeight,
+                    startHeight,
                     ex.Message,
                     now),
                 ct);
@@ -670,13 +857,13 @@ public class FlorestaWalletTracker : IHostedService
             settings,
             (wallet, now) => FlorestaWalletDescriptorMetadata.ApplyRescanRequested(
                 wallet,
-                settings.DefaultRescanStartHeight,
+                startHeight,
                 now),
             ct);
         _logger.LogInformation(
             "Started Floresta rescan for descriptor {DescriptorHash} from height {Height}",
             descriptorRegistration.Descriptors.DescriptorHash,
-            settings.DefaultRescanStartHeight);
+            startHeight);
     }
 
     private async Task UpsertWalletDescriptorMetadataAsync(
@@ -1263,6 +1450,7 @@ public class FlorestaWalletTracker : IHostedService
 
     public class NewTransactionInfo
     {
+        public string WalletId { get; set; }
         public string TxId { get; set; }
         public Transaction Transaction { get; set; }
         public TrackedSource TrackedSource { get; set; }

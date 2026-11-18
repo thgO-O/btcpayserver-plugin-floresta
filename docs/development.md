@@ -41,16 +41,25 @@ Run unit tests:
 dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj --filter "Integration!=Integration&Playwright!=Playwright"
 ```
 
-Run integration tests against a real `florestad` in Docker:
+Run integration tests against a real `florestad` and PostgreSQL in Docker:
 
 ```bash
-docker compose -f docker-compose.integration.yml up -d floresta
+docker compose -f docker-compose.integration.yml --profile full up -d --wait floresta postgres
 
 dotnet test BTCPayServer.Plugins.Floresta.Tests/BTCPayServer.Plugins.Floresta.Tests.csproj \
   --filter "Integration=Integration"
 
-docker compose -f docker-compose.integration.yml down -v
+docker compose -f docker-compose.integration.yml --profile full down -v
 ```
+
+The payment persistence regressions reuse the listener fixture with synthetic
+RPC/Electrum and a real PostgreSQL invoice/payment store. They create and drop a
+unique `floresta_payments_*` database per case, apply the pinned host migrations,
+and cover duplicate delivery, ordinary block refresh and polling with conflicting
+transaction-cache rows in another wallet. `E2E_POSTGRES` overrides the connection;
+the default is the disposable Compose PostgreSQL above. The existing database in
+that connection string is never migrated or dropped by these regressions. The
+database user needs permission to create and drop the isolated test databases.
 
 Run the Playwright E2E tests against BTCPay Server, Floresta, bitcoind, and utreexod:
 
@@ -96,10 +105,59 @@ reconciled normally.
 This scenario waits for automatic descriptor registration, restarts BTCPay and
 waits for the persisted wallet to load while the node is still empty. It then
 reconnects the regtest peers and checks historical recovery during chain replay. The
-automatic rescan can still be rejected during IBD in this ordering; history is
-recovered by replay. The separate case where registration happens during IBD
-after the relevant blocks have already been processed is not covered: a rejected
-rescan is currently not retried automatically.
+plugin persists a pending rescan before importing missing descriptors. It waits
+for an explicit non-IBD response and retries a raced IBD rejection (RPC -32093)
+on later listener initialization passes, even when no descriptors are newly
+registered. Once the listener is initialized, retries prepare only pending wallets;
+an unsuccessful import does not reinitialize other wallets or poll all invoices.
+Readiness-check failures also keep the request pending without bypassing wallet
+initialization's deferred-reconciliation guard.
+If synchronization after an import or recovery retry is deferred or incomplete,
+the tracker retains per-wallet synchronization work in memory. Results reached
+after successful preparation remain eligible for synchronization even when
+automatic rescan is disabled and the rescan status is `NotRequested`. This is
+distinct from work still waiting for preparation. A later failed preparation
+invalidates this rescan-independent eligibility, including a rejected rescan
+after successful descriptor registration. A process-local failure generation
+prevents an older synchronization result from restoring that eligibility.
+An old persisted rescan failure does not block a later successful import.
+Later listener passes synchronize
+only eligible wallets without preparing descriptors again or requesting another
+rescan. Restart uses normal full initialization instead.
+Transactions found by recovery are retained in memory for the listener's existing
+loop to deliver through normal transaction/payment processing, outside the
+initialization lock. Failed deliveries stay queued for a later pass. This also
+preserves received outputs that are already spent, without polling every invoice
+after an unsuccessful or still-deferred retry. Recovery hands newly discovered
+receipts to the existing queue immediately after a successful cache commit,
+before awaiting subscriptions for additional addresses. Cancellation during
+those subscriptions cannot lose a committed receipt. A failed commit publishes
+no receipts, and a successful sync queues each receipt only once.
+Transactions discovered before a
+later failure within the same address are retained when that sync commits. Full
+initialization delivers newly discovered results even without a memory retry
+marker, including a `Requested` wallet restored after restart. Before delivery,
+the listener refreshes confirmation state from that wallet's cache; a receipt
+marked removed is recorded as unaccounted rather than settled. The queue is not
+durable across process termination: already cached receipts lost before delivery
+are not replayed, which is distinct from delivering new results found at startup.
+Ordinary payment refresh and polling also read transaction state from the
+invoice's account derivation. A missing derivation or cache entry does not fall
+back to a different wallet's transaction row.
+Pending intent and its start height survive a plugin restart or
+cancellation. Disabling automatic registration or rescan clears it. A successful
+RPC response records `Requested` and stops rescan retries; other rescan errors record
+`Failed` for operator investigation. Existing `Failed` records from older plugin
+versions are not automatically reclassified.
+
+`Requested` means the node accepted an asynchronous task, not that history is
+complete. At the pinned node revision, compact filters download after IBD and
+there is no RPC exposing their height or rescan completion. An accepted rescan
+can therefore cover incomplete filters. The controlled E2E above does not prove
+recovery when descriptor registration races replay after old blocks were already
+processed. Full automatic recovery for that ordering still needs a node API
+that reports filter coverage and scan completion; operators may need to rescan
+again after filters are available. No fixed delay establishes readiness.
 The fixture enables `utreexod --cfilters` and checks that Floresta has a
 compact-filter peer, which is required for historical rescans. The historical
 payments are mined before the wallet flow and imported later, after the peers

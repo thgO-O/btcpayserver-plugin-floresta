@@ -16,6 +16,7 @@ internal static class FlorestaWalletRescanStatus
 {
     public const string Unknown = "Unknown";
     public const string NotRequested = "NotRequested";
+    public const string Pending = "Pending";
     public const string Requested = "Requested";
     public const string Failed = "Failed";
 }
@@ -54,6 +55,20 @@ internal static class FlorestaWalletDescriptorMetadata
         wallet.RescanStatusUpdatedAt = now;
         wallet.RescanRequestedAt = null;
         wallet.RescanStartHeight = null;
+        wallet.RescanError = null;
+    }
+
+    public static void ApplyRescanPending(TrackedWallet wallet, int? startHeight, DateTimeOffset now)
+    {
+        // Another descriptor must not narrow a pending interval.
+        if (wallet.RescanStatus != FlorestaWalletRescanStatus.Pending)
+            wallet.RescanStartHeight = startHeight;
+        else
+            wallet.RescanStartHeight = wallet.RescanStartHeight is null || startHeight is null
+                ? null : Math.Min(wallet.RescanStartHeight.Value, startHeight.Value);
+        wallet.RescanStatus = FlorestaWalletRescanStatus.Pending;
+        wallet.RescanStatusUpdatedAt = now;
+        wallet.RescanRequestedAt = null;
         wallet.RescanError = null;
     }
 

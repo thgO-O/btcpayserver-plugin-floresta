@@ -115,25 +115,8 @@ public class FlorestaListener : IHostedService
         {
             try
             {
-                if (!await IsBitcoinBackendActiveAsync(ct))
-                {
-                    _listenerInitialized = false;
-                    await Task.Delay(TimeSpan.FromSeconds(10), ct);
-                    continue;
-                }
-
-                if (!_electrumClient.IsConnected)
-                {
-                    _listenerInitialized = false;
-                    await Task.Delay(TimeSpan.FromSeconds(1), ct);
-                    continue;
-                }
-
-                var initializedHeight = await InitializeListenerAsync(ct);
-                if (initializedHeight is not null)
-                    await RequestPaymentPollingAsync(ct);
-
-                await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                var retryDelay = await RunIterationAsync(ct);
+                await Task.Delay(retryDelay, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -148,20 +131,54 @@ public class FlorestaListener : IHostedService
         }
     }
 
+    internal async Task<TimeSpan> RunIterationAsync(CancellationToken ct)
+    {
+        if (!await IsBitcoinBackendActiveAsync(ct))
+        {
+            _listenerInitialized = false;
+            return TimeSpan.FromSeconds(10);
+        }
+
+        if (!_electrumClient.IsConnected)
+        {
+            _listenerInitialized = false;
+            return TimeSpan.FromSeconds(1);
+        }
+
+        var initializedHeight = await InitializeListenerAsync(ct);
+        if (_statusMonitor.IsNetworkCompatible)
+            await ProcessRecoveredTransactionsAsync(ProcessRecoveredTransactionAsync, ct);
+        if (initializedHeight is not null)
+            await RequestPaymentPollingAsync(ct);
+
+        return TimeSpan.FromSeconds(10);
+    }
+
     internal async Task<int?> InitializeListenerAsync(CancellationToken ct)
     {
         await _initializationLock.WaitAsync(ct);
         try
         {
-            if (_listenerInitialized &&
+            var retryPendingOnly = _listenerInitialized &&
                 _initializedConnectionGeneration == _electrumClient.ConnectionGeneration &&
-                _statusMonitor.IsInitialBlockDownload != true)
+                _statusMonitor.IsInitialBlockDownload != true;
+            if (retryPendingOnly && !_tracker.HasDeferredWalletSynchronizations &&
+                !await _tracker.HasPendingDescriptorRescansAsync(ct))
                 return null;
 
             await _statusMonitor.RefreshAsync(ct);
             if (!_statusMonitor.IsNetworkCompatible)
             {
                 _listenerInitialized = false;
+                return null;
+            }
+
+            // Refresh compatibility before retrying, without reinitializing
+            // unrelated wallets or polling every invoice for a failed import.
+            if (retryPendingOnly && _statusMonitor.IsInitialBlockDownload != true &&
+                _initializedConnectionGeneration == _electrumClient.ConnectionGeneration)
+            {
+                await _tracker.RetryPendingWalletsAsync(ct);
                 return null;
             }
 
@@ -320,7 +337,61 @@ public class FlorestaListener : IHostedService
         }
     }
 
-    private async Task PublishChainUpdate(CancellationToken ct)
+    internal async Task<bool> ProcessRecoveredTransactionAsync(
+        FlorestaWalletTracker.NewTransactionInfo transaction, CancellationToken ct)
+    {
+        var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
+        if (network == null) return false;
+        var wallet = _walletProvider.GetWallet(network);
+        if (wallet == null || _handlers.GetBitcoinHandler(network) == null) return false;
+
+        // A retained receipt may outlive a reorg or history reconciliation.
+        // Use its actual cache owner, not an unrelated wallet with the same txid.
+        if (transaction.WalletId == null) return false;
+        var current = await _tracker.GetTransactionInfoAsync(transaction.WalletId, transaction.TxId, ct);
+        if (current == null) return false;
+        transaction.Confirmations = (int)current.Confirmations;
+        transaction.Height = (int)(current.Height ?? 0);
+
+        await ProcessNewTransaction(transaction, network, wallet,
+            PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode), ct);
+        return true;
+    }
+
+    internal async Task ProcessRecoveredTransactionsAsync(
+        Func<FlorestaWalletTracker.NewTransactionInfo, CancellationToken, Task<bool>> process,
+        CancellationToken ct)
+    {
+        // One bounded pass: failed deliveries remain for the existing listener
+        // loop, while other recovered transactions can still be processed.
+        var count = _tracker.RecoveredTransactions.Count;
+        for (var i = 0; i < count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            // This loop is the only consumer. Keep the head while awaiting the
+            // payment pipeline so cancellation cannot acknowledge it early.
+            if (!_tracker.RecoveredTransactions.TryPeek(out var transaction))
+                break;
+            var processed = false;
+            try
+            {
+                processed = await process(transaction, ct);
+                ct.ThrowIfCancellationRequested();
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to process recovered transaction {TxId}; retrying", transaction.TxId);
+            }
+            if (_tracker.RecoveredTransactions.TryDequeue(out var delivered) && !processed)
+                _tracker.RecoveredTransactions.Enqueue(delivered);
+        }
+    }
+
+    internal async Task PublishChainUpdate(CancellationToken ct)
     {
         var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
         if (network == null) return;
@@ -497,7 +568,8 @@ public class FlorestaListener : IHostedService
                     if (!InvoiceTracksScriptPubKey(invoice, pmi, network, coin.ScriptPubKey))
                         continue;
 
-                    var tx = await wallet.GetTransactionAsync(coin.OutPoint.Hash, cancellation: ct);
+                    var tx = await _tracker.GetTransactionInfoAsync(
+                        strategy.ToString(), coin.OutPoint.Hash.ToString(), ct);
                     if (tx == null) continue;
 
                     var paymentData = new PaymentData
@@ -553,7 +625,7 @@ public class FlorestaListener : IHostedService
             _logger.LogInformation("Found {Count} payments via polling", paymentCount);
     }
 
-    private async Task RequestPaymentPollingAsync(CancellationToken ct)
+    internal async Task RequestPaymentPollingAsync(CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
 
@@ -630,6 +702,10 @@ public class FlorestaListener : IHostedService
         var handler = _handlers.GetBitcoinHandler(network);
         if (handler == null) return false;
 
+        var prompt = invoice.GetPaymentPrompt(pmi);
+        var strategy = prompt?.Details == null ? null : handler.ParsePaymentPromptDetails(prompt.Details)?.AccountDerivation;
+        if (strategy == null) return false;
+
         var updated = new List<PaymentEntity>();
         foreach (var payment in invoice.GetPayments(false).Where(p => p.PaymentMethodId == pmi))
         {
@@ -639,14 +715,15 @@ public class FlorestaListener : IHostedService
             if (details == null)
                 continue;
 
-            var tx = await wallet.GetTransactionAsync(details.Outpoint.Hash, cancellation: ct);
-            if (tx == null)
-                continue;
-
             var oldConfirmationCount = details.ConfirmationCount;
             var oldRbf = details.RBF;
             var oldStatus = payment.Status;
 
+            // Transaction rows are scoped by wallet. Another wallet can have
+            // different cached history for the same txid during reconciliation.
+            var tx = await _tracker.GetTransactionInfoAsync(strategy.ToString(), details.Outpoint.Hash.ToString(), ct);
+            if (tx == null)
+                continue;
             details.ConfirmationCount = ClampConfirmations(tx.Confirmations, network);
             details.RBF = tx.Transaction?.RBF ?? details.RBF;
             payment.Status = GetPaymentStatus(invoice, details);

@@ -111,13 +111,14 @@ internal sealed class FlorestaWalletSync
         string walletId,
         List<TrackedAddress> addresses,
         CancellationToken ct,
-        Action<int, int> reportProgress = null)
+        Action<int, int> reportProgress = null,
+        Action<WalletSyncResult> onCommitted = null)
     {
         var walletLock = GetWalletLock(walletId);
         await walletLock.WaitAsync(ct);
         try
         {
-            return await SyncWalletStateCoreAsync(walletId, addresses, ct, reportProgress);
+            return await SyncWalletStateCoreAsync(walletId, addresses, ct, reportProgress, onCommitted);
         }
         finally
         {
@@ -236,7 +237,8 @@ internal sealed class FlorestaWalletSync
         string walletId,
         List<TrackedAddress> addresses,
         CancellationToken ct,
-        Action<int, int> reportProgress)
+        Action<int, int> reportProgress,
+        Action<WalletSyncResult> onCommitted = null)
     {
         var connectionGeneration = _client.ConnectionGeneration;
         bool isInitialBlockDownload;
@@ -282,16 +284,17 @@ internal sealed class FlorestaWalletSync
                 if (walletAddresses.TryGetValue(addr.Scripthash, out var trackedAddress))
                 {
                     var beforeSubscribeCount = addressesToSubscribe.Count;
-                    newTxs.AddRange(await SyncAddressAsync(
+                    await SyncAddressAsync(
                         ctx,
                         trackedAddress,
                         strategy,
                         walletAddresses,
                         existingTxids,
                         observedHistoryTxids,
+                        newTxs,
                         token,
                         addressesToSubscribe,
-                        connectionGeneration));
+                        connectionGeneration);
 
                     var addedAddresses = addressesToSubscribe.Skip(beforeSubscribeCount).ToList();
                     foreach (var added in addedAddresses)
@@ -324,8 +327,11 @@ internal sealed class FlorestaWalletSync
         }
 
         await ctx.SaveChangesAsync(ct);
+        var result = new WalletSyncResult(newTxs, summary);
+        // Recovery must own committed receipts before cancellable subscriptions.
+        onCommitted?.Invoke(result);
         await SubscribeTrackedAddressesAsync(addressesToSubscribe, ct);
-        return new WalletSyncResult(newTxs, summary);
+        return result;
     }
 
     private async Task<bool> IsNodeInInitialBlockDownloadAsync(CancellationToken ct)
@@ -394,19 +400,19 @@ internal sealed class FlorestaWalletSync
         return new WalletAddressSyncSummary(attempted, succeeded, failed);
     }
 
-    private async Task<List<FlorestaWalletTracker.NewTransactionInfo>> SyncAddressAsync(
+    private async Task SyncAddressAsync(
         FlorestaDbContext ctx,
         TrackedAddress addr,
         DerivationStrategyBase strategy,
         IDictionary<string, TrackedAddress> walletAddresses,
         HashSet<string> existingTxids,
         HashSet<string> observedHistoryTxids,
+        List<FlorestaWalletTracker.NewTransactionInfo> newTransactions,
         CancellationToken ct,
         List<TrackedAddress> addressesToSubscribe,
         long connectionGeneration)
     {
         EnsureConnectionGeneration(connectionGeneration);
-        var newTxs = new List<FlorestaWalletTracker.NewTransactionInfo>();
         var history = await _client.ScripthashGetHistoryAsync(addr.Scripthash, ct);
         var canUpdateAddressState = ctx.Entry(addr).State != EntityState.Detached;
         var utxos = canUpdateAddressState ? await _utxoCache.GetReconciledAsync(addr, ct) : null;
@@ -429,6 +435,7 @@ internal sealed class FlorestaWalletSync
             var tx = Transaction.Parse(rawHex, _network);
             var balanceChange = ComputeBalanceChange(ctx, tx, addr.WalletId, walletAddresses.Values);
 
+            var txInfo = BuildNewTransactionInfo(tx, strategy, addr, item, walletAddresses);
             ctx.Transactions.Add(new TrackedTransaction
             {
                 Txid = item.TxHash,
@@ -441,9 +448,10 @@ internal sealed class FlorestaWalletSync
             });
             existingTxids.Add(item.TxHash);
 
-            var txInfo = BuildNewTransactionInfo(tx, strategy, addr, item, walletAddresses);
+            // A later failure for this address must not discard a transaction
+            // whose entity is still committed by the wallet synchronization.
             if (txInfo != null)
-                newTxs.Add(txInfo);
+                newTransactions.Add(txInfo);
         }
 
         if (canUpdateAddressState)
@@ -462,7 +470,6 @@ internal sealed class FlorestaWalletSync
             }
         }
 
-        return newTxs;
     }
 
     private SemaphoreSlim GetWalletLock(string walletId)
@@ -511,6 +518,7 @@ internal sealed class FlorestaWalletSync
         var confirmations = FlorestaWalletTracker.GetConfirmations(historyItem.Height, tipHeight);
         var info = new FlorestaWalletTracker.NewTransactionInfo
         {
+            WalletId = triggeringAddress.WalletId,
             TxId = tx.GetHash().ToString(),
             Transaction = tx,
             DerivationStrategy = strategy,

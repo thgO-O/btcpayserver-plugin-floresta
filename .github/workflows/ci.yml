@@ -90,7 +90,7 @@ jobs:
           -nr:false
 
       - name: Start integration infrastructure
-        run: docker compose -f docker-compose.integration.yml up -d floresta
+        run: docker compose -f docker-compose.integration.yml --profile full up -d --wait --wait-timeout 120 floresta postgres
 
       - name: Run integration tests
         run: >
@@ -106,11 +106,11 @@ jobs:
 
       - name: Show integration logs on failure
         if: failure()
-        run: docker compose -f docker-compose.integration.yml logs --no-color --tail 200 floresta
+        run: docker compose -f docker-compose.integration.yml --profile full logs --no-color --tail 200 floresta postgres
 
       - name: Cleanup integration stack
         if: always()
-        run: docker compose -f docker-compose.integration.yml down --volumes --remove-orphans
+        run: docker compose -f docker-compose.integration.yml --profile full down --volumes --remove-orphans
 
       - name: Install Playwright browsers
         run: |
