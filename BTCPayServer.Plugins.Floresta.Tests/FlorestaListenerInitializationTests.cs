@@ -22,6 +22,7 @@ using BTCPayServer.Services;
 using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Wallets;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -1775,6 +1776,7 @@ public partial class FlorestaListenerInitializationTests
             new DbContextOptionsBuilder<FlorestaDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
 
         public bool FailNextContext { get; set; }
+        public bool FailNextSave { get; set; }
         public Action? BeforeCreateContext { get; set; }
 
         public override FlorestaDbContext CreateContext(Action<NpgsqlDbContextOptionsBuilder>? npgsqlOptionsAction = null)
@@ -1785,7 +1787,22 @@ public partial class FlorestaListenerInitializationTests
                 FailNextContext = false;
                 throw new InvalidOperationException("Wallet database unavailable");
             }
-            return new(_options);
+            return new(new DbContextOptionsBuilder<FlorestaDbContext>(_options)
+                .AddInterceptors(new CommitFailureInterceptor(this)).Options);
+        }
+
+        private sealed class CommitFailureInterceptor(DatabaseFactory database) : SaveChangesInterceptor
+        {
+            public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+                DbContextEventData eventData, InterceptionResult<int> result, CancellationToken ct = default)
+            {
+                if (database.FailNextSave)
+                {
+                    database.FailNextSave = false;
+                    throw new DbUpdateException("Wallet cache commit temporarily unavailable");
+                }
+                return base.SavingChangesAsync(eventData, result, ct);
+            }
         }
     }
 

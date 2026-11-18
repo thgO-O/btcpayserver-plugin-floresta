@@ -194,9 +194,8 @@ public class FlorestaWalletTracker : IHostedService
                     _preparedWallets[walletId] = appliedKey;
                 }
                 prepared = true;
-                var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, currentAddresses, ct);
-                // Newly discovered initialization results need delivery even
-                // when restart or a previous complete sync cleared memory debt.
+                var result = await _walletSync.SyncWalletStateWithResultAsync(walletId, currentAddresses, ct,
+                    onCommitted: EnqueueCommittedRecoveryTransactions);
                 RecordRecoverySynchronizationResult(walletId, result, failureGeneration);
                 synchronizationDeferred |= result.Deferred;
             }
@@ -293,7 +292,8 @@ public class FlorestaWalletTracker : IHostedService
         FlorestaWalletSync.WalletSyncResult result;
         try
         {
-            result = await _walletSync.SyncWalletStateWithResultAsync(walletId, addresses, ct);
+            result = await _walletSync.SyncWalletStateWithResultAsync(walletId, addresses, ct,
+                onCommitted: EnqueueCommittedRecoveryTransactions);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -308,13 +308,17 @@ public class FlorestaWalletTracker : IHostedService
         RecordRecoverySynchronizationResult(walletId, result, failureGeneration);
     }
 
-    internal void RecordRecoverySynchronizationResult(
-        string walletId, FlorestaWalletSync.WalletSyncResult result, long failureGeneration)
+    private void EnqueueCommittedRecoveryTransactions(FlorestaWalletSync.WalletSyncResult result)
     {
         // The cache now knows these txids, so later syncs will not rediscover
         // them. Keep the complete transaction until the listener processes it.
         foreach (var transaction in result.NewTransactions)
             RecoveredTransactions.Enqueue(transaction);
+    }
+
+    internal void RecordRecoverySynchronizationResult(
+        string walletId, FlorestaWalletSync.WalletSyncResult result, long failureGeneration)
+    {
         if (!result.Deferred && result.Summary.IsComplete)
         {
             if (_deferredWalletSynchronizations.TryGetValue(walletId, out var recorded) &&

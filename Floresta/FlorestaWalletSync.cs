@@ -111,13 +111,14 @@ internal sealed class FlorestaWalletSync
         string walletId,
         List<TrackedAddress> addresses,
         CancellationToken ct,
-        Action<int, int> reportProgress = null)
+        Action<int, int> reportProgress = null,
+        Action<WalletSyncResult> onCommitted = null)
     {
         var walletLock = GetWalletLock(walletId);
         await walletLock.WaitAsync(ct);
         try
         {
-            return await SyncWalletStateCoreAsync(walletId, addresses, ct, reportProgress);
+            return await SyncWalletStateCoreAsync(walletId, addresses, ct, reportProgress, onCommitted);
         }
         finally
         {
@@ -236,7 +237,8 @@ internal sealed class FlorestaWalletSync
         string walletId,
         List<TrackedAddress> addresses,
         CancellationToken ct,
-        Action<int, int> reportProgress)
+        Action<int, int> reportProgress,
+        Action<WalletSyncResult> onCommitted = null)
     {
         var connectionGeneration = _client.ConnectionGeneration;
         bool isInitialBlockDownload;
@@ -325,8 +327,11 @@ internal sealed class FlorestaWalletSync
         }
 
         await ctx.SaveChangesAsync(ct);
+        var result = new WalletSyncResult(newTxs, summary);
+        // Recovery must own committed receipts before cancellable subscriptions.
+        onCommitted?.Invoke(result);
         await SubscribeTrackedAddressesAsync(addressesToSubscribe, ct);
-        return new WalletSyncResult(newTxs, summary);
+        return result;
     }
 
     private async Task<bool> IsNodeInInitialBlockDownloadAsync(CancellationToken ct)

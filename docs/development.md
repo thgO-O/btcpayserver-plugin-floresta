@@ -128,7 +128,12 @@ Transactions found by recovery are retained in memory for the listener's existin
 loop to deliver through normal transaction/payment processing, outside the
 initialization lock. Failed deliveries stay queued for a later pass. This also
 preserves received outputs that are already spent, without polling every invoice
-after an unsuccessful or still-deferred retry. Transactions discovered before a
+after an unsuccessful or still-deferred retry. Recovery hands newly discovered
+receipts to the existing queue immediately after a successful cache commit,
+before awaiting subscriptions for additional addresses. Cancellation during
+those subscriptions cannot lose a committed receipt. A failed commit publishes
+no receipts, and a successful sync queues each receipt only once.
+Transactions discovered before a
 later failure within the same address are retained when that sync commits. Full
 initialization delivers newly discovered results even without a memory retry
 marker, including a `Requested` wallet restored after restart. Before delivery,
