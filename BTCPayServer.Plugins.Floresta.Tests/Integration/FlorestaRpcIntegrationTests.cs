@@ -62,6 +62,8 @@ public class FlorestaRpcIntegrationTests
         if (exception is null)
             return;
 
+        Assert.Equal(-32093, Assert.IsType<FlorestaRpcException>(exception).Code);
+
         var message = exception.ToString();
         Assert.Contains("rescanblockchain", message, StringComparison.OrdinalIgnoreCase);
         Assert.True(

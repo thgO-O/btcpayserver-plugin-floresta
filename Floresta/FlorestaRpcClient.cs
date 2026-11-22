@@ -124,13 +124,27 @@ public class FlorestaRpcClient(
 
         using var response = await httpClient.SendAsync(request, ct);
         var body = await response.Content.ReadAsStringAsync(ct);
-        if (!response.IsSuccessStatusCode)
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(body);
+        }
+        catch (JsonException) when (!response.IsSuccessStatusCode)
+        {
             throw new FlorestaRpcException($"Floresta RPC {method} failed with HTTP {(int)response.StatusCode}: {body}");
-
-        using var doc = JsonDocument.Parse(body);
+        }
+        using var responseDocument = doc;
         var root = doc.RootElement;
         if (root.TryGetProperty("error", out var error) && error.ValueKind != JsonValueKind.Null)
-            throw new FlorestaRpcException($"Floresta RPC {method} error: {error}");
+        {
+            int? code = error.ValueKind == JsonValueKind.Object &&
+                        error.TryGetProperty("code", out var codeElement) &&
+                        codeElement.ValueKind == JsonValueKind.Number && codeElement.TryGetInt32(out var value)
+                ? value : null;
+            throw new FlorestaRpcException($"Floresta RPC {method} error: {error}", code);
+        }
+        if (!response.IsSuccessStatusCode)
+            throw new FlorestaRpcException($"Floresta RPC {method} failed with HTTP {(int)response.StatusCode}: {body}");
 
         if (!root.TryGetProperty("result", out var result))
             return default;
@@ -155,4 +169,7 @@ public class FlorestaRpcClient(
     }
 }
 
-public class FlorestaRpcException(string message) : Exception(message);
+public class FlorestaRpcException(string message, int? code = null) : Exception(message)
+{
+    public int? Code { get; } = code;
+}
