@@ -130,8 +130,9 @@ Each wallet synchronization hands newly discovered transaction receipts to one
 process-local delivery queue immediately after its cache commit, before awaiting
 post-commit subscriptions. Initialization, import, block and scripthash updates,
 reconnect catch-up, wallet UTXO scans and address-source tracking share that
-handoff. A failure later in a batch or cancellation during subscription cannot
-erase ownership of an already committed receipt. Node-only administrative
+handoff. Failed cache commits publish no receipts. A failure later in a batch or
+cancellation during subscription cannot erase ownership of an already committed
+receipt. Node-only administrative
 descriptor registration and rescan commands keep their existing semantics; they
 do not themselves synchronize the plugin's wallet cache.
 The listener drains the queue through normal transaction/payment processing.

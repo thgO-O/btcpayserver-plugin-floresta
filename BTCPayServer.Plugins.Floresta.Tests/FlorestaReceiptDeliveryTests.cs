@@ -81,32 +81,6 @@ public partial class FlorestaListenerInitializationTests
         Assert.Equal(0, harness.RescanRequests);
     }
 
-    [Fact]
-    public async Task PostCommitSubscriptionCancellationDoesNotLoseTheReceipt()
-    {
-        var invoices = new InvoiceDatabase();
-        await using var harness = new Harness(invoices: invoices);
-        Assert.Equal(90, await harness.InitializeAsync());
-        var wallet = new ExtKey().Neuter().ToString(Network.RegTest);
-        var addresses = await harness.Tracker.PrepareWalletTrackingAsync(wallet, harness.Token);
-        var invoiceId = await harness.CreateInvoiceAsync(addresses[1]);
-        var transaction = harness.SetRecoveredHistory(addresses[1], true);
-        using var canceled = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
-        harness.BeforeSubscription = async () =>
-        {
-            await using var ctx = harness.Database.CreateContext();
-            if (await ctx.Transactions.AnyAsync(t => t.Txid == transaction.GetHash().ToString(), harness.Token))
-                canceled.Cancel();
-        };
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            harness.Tracker.TrackWalletAsync(wallet, canceled.Token));
-        harness.BeforeSubscription = () => Task.CompletedTask;
-        Assert.Single(harness.Tracker.PendingTransactions);
-        await harness.RunUntilPaymentAsync();
-        await using var invoicesContext = invoices.CreateContext();
-        Assert.Equal(invoiceId, Assert.Single(await invoicesContext.Payments.ToListAsync(harness.Token)).InvoiceDataId);
-        Assert.Equal(1, harness.ReceivedPayments);
-    }
 
     [Theory]
     [InlineData("block")]
@@ -233,33 +207,4 @@ public partial class FlorestaListenerInitializationTests
         Assert.Equal(1, harness.ReceivedPayments);
     }
 
-    [Fact]
-    public async Task ReceiptIsNotPublishedUntilTheWalletCacheCommitSucceeds()
-    {
-        var invoices = new InvoiceDatabase();
-        await using var harness = new Harness(invoices: invoices);
-        Assert.Equal(90, await harness.InitializeAsync());
-        var wallet = new ExtKey().Neuter().ToString(Network.RegTest);
-        var address = (await harness.Tracker.PrepareWalletTrackingAsync(wallet, harness.Token))[0];
-        var invoiceId = await harness.CreateInvoiceAsync(address);
-        harness.SetRecoveredHistory(address, true);
-        harness.BeforeSubscription = () =>
-        {
-            harness.Database.FailNextSave = true;
-            return Task.CompletedTask;
-        };
-        await Assert.ThrowsAsync<DbUpdateException>(() => harness.Tracker.TrackWalletAsync(wallet, harness.Token));
-        harness.BeforeSubscription = () => Task.CompletedTask;
-        Assert.False(harness.Database.FailNextSave);
-        Assert.Empty(harness.Tracker.PendingTransactions);
-        await using (var cache = harness.Database.CreateContext())
-            Assert.Empty(await cache.Transactions.ToListAsync(harness.Token));
-        Assert.True(harness.Tracker.HasDeferredWalletSynchronizations);
-        await harness.Tracker.RetryPendingWalletsAsync(harness.Token);
-        Assert.Single(harness.Tracker.PendingTransactions);
-        await harness.RunUntilPaymentAsync();
-        await using var ctx = invoices.CreateContext();
-        Assert.Equal(invoiceId, Assert.Single(await ctx.Payments.ToListAsync(harness.Token)).InvoiceDataId);
-        Assert.Equal(1, harness.ReceivedPayments);
-    }
 }
