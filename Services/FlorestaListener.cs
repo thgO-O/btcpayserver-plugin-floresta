@@ -331,9 +331,8 @@ public class FlorestaListener : IHostedService
         transaction.Confirmations = (int)current.Confirmations;
         transaction.Height = (int)(current.Height ?? 0);
 
-        await ProcessNewTransaction(transaction, network, wallet,
+        return await ProcessNewTransaction(transaction, network, wallet,
             PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode), ct);
-        return ReceiptDeliveryResult.Delivered;
     }
 
     internal Task ProcessPendingTransactionsAsync(
@@ -350,7 +349,7 @@ public class FlorestaListener : IHostedService
         await UpdatePaymentStates(network, pmi, ct);
     }
 
-    private async Task ProcessNewTransaction(
+    private async Task<ReceiptDeliveryResult> ProcessNewTransaction(
         FlorestaWalletTracker.NewTransactionInfo txInfo,
         BTCPayNetwork network, BTCPayWallet wallet, PaymentMethodId pmi, CancellationToken ct)
     {
@@ -360,10 +359,12 @@ public class FlorestaListener : IHostedService
         PublishNewOnChainTransaction(txInfo, network, pmi);
 
         if (txInfo.DerivationStrategy == null)
-            return;
+            return ReceiptDeliveryResult.Delivered;
 
+        var result = ReceiptDeliveryResult.Delivered;
         foreach (var output in txInfo.Outputs)
         {
+            ct.ThrowIfCancellationRequested();
             var invoice = await _invoiceRepository.GetInvoiceFromAddress(pmi, output.TrackedDestination);
             if (invoice == null)
                 continue;
@@ -409,17 +410,22 @@ public class FlorestaListener : IHostedService
             else
             {
                 // The host also returns null when saving the payment fails.
-                // Acknowledge only a persisted duplicate or an invoice that no
-                // longer accepts this method; otherwise retain the receipt.
+                // Retain the receipt if this output still needs a write, while
+                // allowing the transaction's other outputs to make progress.
                 var currentInvoice = await _invoiceRepository.GetInvoice(invoice.Id);
                 if (currentInvoice?.GetPaymentPrompt(pmi) == null)
                     continue;
                 if (!currentInvoice.GetPayments(false).Any(p => p.Id == paymentData.Id && p.PaymentMethodId == pmi))
-                    throw new InvalidOperationException($"Payment {paymentData.Id} was not persisted; delivery will be retried.");
+                {
+                    _logger.LogWarning("Payment {PaymentId} was not persisted; delivery will be retried", paymentData.Id);
+                    result = ReceiptDeliveryResult.Retry;
+                    continue;
+                }
                 if (await UpdatePaymentStatesForInvoice(network, pmi, currentInvoice, ct))
                     _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
             }
         }
+        return result;
     }
 
     internal static OutPoint CreatePaymentOutPoint(string txId, int outputIndex)

@@ -130,6 +130,10 @@ public partial class FlorestaListenerInitializationTests
         await harness.Listener.ProcessPendingTransactionsAsync((_, _) =>
             Task.FromResult(ReceiptDeliveryResult.Retry), deadline.Token);
         Assert.Equal(transaction.GetHash().ToString(), Assert.Single(harness.Tracker.PendingTransactions).TxId);
+        // Polling can also hit the injected context failure, but only the
+        // event's receipt delivery publishes the transaction before the lookup.
+        Assert.Equal(1, harness.OnChainEvents);
+        Assert.Equal(transaction.GetHash(), harness.LastOnChainTransaction!.TransactionHash);
         Assert.Equal(0, harness.ReceivedPayments);
         await harness.RunUntilPaymentAsync();
         await using var ctx = invoices.CreateContext();
@@ -205,6 +209,53 @@ public partial class FlorestaListenerInitializationTests
         await using var context = invoices.CreateContext();
         Assert.Equal(invoiceId, Assert.Single(await context.Payments.ToListAsync(harness.Token)).InvoiceDataId);
         Assert.Equal(1, harness.ReceivedPayments);
+    }
+
+    [Fact]
+    [Trait("Integration", "Integration")]
+    public async Task PaymentSaveFailureStillDeliversLaterOutputs()
+    {
+        await using var invoices = await PostgresInvoiceDatabase.CreateAsync();
+        await using var harness = new Harness(invoices: invoices);
+        Assert.Equal(90, await harness.InitializeAsync());
+        var wallet = new ExtKey().Neuter().ToString(Network.RegTest);
+        var addresses = await harness.Tracker.PrepareWalletTrackingAsync(wallet, harness.Token);
+        var firstInvoice = await harness.CreateInvoiceAsync(addresses[0]);
+        var secondInvoice = await harness.CreateInvoiceAsync(addresses[1]);
+        var transaction = Network.RegTest.CreateTransaction();
+        transaction.Inputs.Add(new TxIn(new OutPoint(uint256.One, 0)));
+        transaction.Outputs.Add(Money.Satoshis(1234), new Script(addresses[0].ScriptPubKey));
+        transaction.Outputs.Add(Money.Satoshis(2345), new Script(addresses[1].ScriptPubKey));
+        var txid = transaction.GetHash();
+        harness.RawTransactions.Add(txid.ToString(), transaction.ToHex());
+        harness.HistoryResponse = script => script == addresses[0].Scripthash || script == addresses[1].Scripthash
+            ? new object[] { new { tx_hash = txid.ToString(), height = 80 } }
+            : Array.Empty<object>();
+        await harness.Tracker.TrackWalletAsync(wallet, harness.Token);
+
+        await using var faultContext = invoices.CreateContext();
+        // Reject only the first output in this test's disposable invoice database.
+        await faultContext.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Payments" ADD CONSTRAINT reject_first_output CHECK ("Amount" <> 0.00001234)""", harness.Token);
+        await harness.Listener.ProcessPendingTransactionsAsync(harness.Listener.ProcessPendingTransactionAsync, harness.Token);
+        Assert.Single(harness.Tracker.PendingTransactions);
+        await using (var context = invoices.CreateContext())
+        {
+            var payment = Assert.Single(await context.Payments.AsNoTracking().ToListAsync(harness.Token));
+            Assert.Equal(secondInvoice, payment.InvoiceDataId);
+            Assert.Equal(new OutPoint(txid, 1).ToString(), payment.Id);
+        }
+        Assert.Equal(1, harness.ReceivedPayments);
+
+        await faultContext.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Payments" DROP CONSTRAINT reject_first_output""", harness.Token);
+        await harness.Listener.ProcessPendingTransactionsAsync(harness.Listener.ProcessPendingTransactionAsync, harness.Token);
+        await using var retriedContext = invoices.CreateContext();
+        var payments = await retriedContext.Payments.AsNoTracking().OrderBy(p => p.Id).ToListAsync(harness.Token);
+        Assert.Equal(new[] { firstInvoice, secondInvoice }, payments.Select(p => p.InvoiceDataId));
+        Assert.Equal(new[] { new OutPoint(txid, 0).ToString(), new OutPoint(txid, 1).ToString() }, payments.Select(p => p.Id));
+        Assert.Equal(2, harness.ReceivedPayments);
+        Assert.Empty(harness.Tracker.PendingTransactions);
     }
 
 }
