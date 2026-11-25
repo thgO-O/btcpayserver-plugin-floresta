@@ -365,67 +365,82 @@ public class FlorestaListener : IHostedService
         foreach (var output in txInfo.Outputs)
         {
             ct.ThrowIfCancellationRequested();
-            var invoice = await _invoiceRepository.GetInvoiceFromAddress(pmi, output.TrackedDestination);
-            if (invoice == null)
-                continue;
-
-            var outpoint = CreatePaymentOutPoint(txInfo.TxId, output.Index);
-
-            var paymentData = new PaymentData
+            try
             {
-                Id = outpoint.ToString(),
-                InvoiceDataId = invoice.Id,
-                PaymentMethodId = pmi.ToString(),
-                Status = txInfo.Confirmations > 0 ? PaymentStatus.Settled : PaymentStatus.Processing,
-                Amount = output.Value.ToDecimal(MoneyUnit.BTC),
-                Currency = network.CryptoCode,
-                Created = txInfo.SeenAt
-            };
-
-            var handler = _handlers.GetBitcoinHandler(network);
-            if (handler == null) continue;
-
-            var details = new BitcoinLikePaymentData(
-                outpoint,
-                txInfo.IsRbf,
-                new KeyPath(output.KeyPath),
-                output.KeyIndex)
-            {
-                ConfirmationCount = ClampConfirmations(txInfo.Confirmations, network)
-            };
-
-            paymentData.Set(invoice, handler, details);
-            paymentData.Status = GetPaymentStatus(invoice, details);
-
-            var payment = await _paymentService.AddPayment(paymentData, [txInfo.TxId]);
-            if (payment != null)
-            {
-                _logger.LogInformation("Recorded payment {PaymentId} for invoice {InvoiceId}",
-                    payment.Id, invoice.Id);
-                _eventAggregator.Publish(new InvoiceEvent(invoice, InvoiceEvent.ReceivedPayment)
-                {
-                    Payment = payment
-                });
-            }
-            else
-            {
-                // The host also returns null when saving the payment fails.
-                // Retain the receipt if this output still needs a write, while
-                // allowing the transaction's other outputs to make progress.
-                var currentInvoice = await _invoiceRepository.GetInvoice(invoice.Id);
-                if (currentInvoice?.GetPaymentPrompt(pmi) == null)
-                    continue;
-                if (!currentInvoice.GetPayments(false).Any(p => p.Id == paymentData.Id && p.PaymentMethodId == pmi))
-                {
-                    _logger.LogWarning("Payment {PaymentId} was not persisted; delivery will be retried", paymentData.Id);
+                if (await ProcessPaymentOutputAsync(txInfo, output, network, pmi, ct) == ReceiptDeliveryResult.Retry)
                     result = ReceiptDeliveryResult.Retry;
-                    continue;
-                }
-                if (await UpdatePaymentStatesForInvoice(network, pmi, currentInvoice, ct))
-                    _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
+            }
+            catch (Exception ex)
+            {
+                ct.ThrowIfCancellationRequested();
+                _logger.LogWarning(ex, "Failed to deliver transaction {TxId} output {OutputIndex}; retrying",
+                    txInfo.TxId, output.Index);
+                result = ReceiptDeliveryResult.Retry;
             }
         }
         return result;
+    }
+
+    private async Task<ReceiptDeliveryResult> ProcessPaymentOutputAsync(
+        FlorestaWalletTracker.NewTransactionInfo txInfo, FlorestaWalletTracker.OutputInfo output,
+        BTCPayNetwork network, PaymentMethodId pmi, CancellationToken ct)
+    {
+        var invoice = await _invoiceRepository.GetInvoiceFromAddress(pmi, output.TrackedDestination);
+        if (invoice == null)
+            return ReceiptDeliveryResult.Delivered;
+
+        var outpoint = CreatePaymentOutPoint(txInfo.TxId, output.Index);
+        var paymentData = new PaymentData
+        {
+            Id = outpoint.ToString(),
+            InvoiceDataId = invoice.Id,
+            PaymentMethodId = pmi.ToString(),
+            Status = txInfo.Confirmations > 0 ? PaymentStatus.Settled : PaymentStatus.Processing,
+            Amount = output.Value.ToDecimal(MoneyUnit.BTC),
+            Currency = network.CryptoCode,
+            Created = txInfo.SeenAt
+        };
+
+        var handler = _handlers.GetBitcoinHandler(network);
+        if (handler == null)
+            return ReceiptDeliveryResult.Delivered;
+
+        var details = new BitcoinLikePaymentData(
+            outpoint,
+            txInfo.IsRbf,
+            new KeyPath(output.KeyPath),
+            output.KeyIndex)
+        {
+            ConfirmationCount = ClampConfirmations(txInfo.Confirmations, network)
+        };
+
+        paymentData.Set(invoice, handler, details);
+        paymentData.Status = GetPaymentStatus(invoice, details);
+
+        var payment = await _paymentService.AddPayment(paymentData, [txInfo.TxId]);
+        if (payment != null)
+        {
+            _logger.LogInformation("Recorded payment {PaymentId} for invoice {InvoiceId}",
+                payment.Id, invoice.Id);
+            _eventAggregator.Publish(new InvoiceEvent(invoice, InvoiceEvent.ReceivedPayment)
+            {
+                Payment = payment
+            });
+            return ReceiptDeliveryResult.Delivered;
+        }
+
+        // The host also returns null when saving the payment fails.
+        var currentInvoice = await _invoiceRepository.GetInvoice(invoice.Id);
+        if (currentInvoice?.GetPaymentPrompt(pmi) == null)
+            return ReceiptDeliveryResult.Delivered;
+        if (!currentInvoice.GetPayments(false).Any(p => p.Id == paymentData.Id && p.PaymentMethodId == pmi))
+        {
+            _logger.LogWarning("Payment {PaymentId} was not persisted; delivery will be retried", paymentData.Id);
+            return ReceiptDeliveryResult.Retry;
+        }
+        if (await UpdatePaymentStatesForInvoice(network, pmi, currentInvoice, ct))
+            _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
+        return ReceiptDeliveryResult.Delivered;
     }
 
     internal static OutPoint CreatePaymentOutPoint(string txId, int outputIndex)

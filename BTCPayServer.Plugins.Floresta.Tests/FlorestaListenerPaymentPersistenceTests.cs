@@ -10,10 +10,13 @@ using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Floresta.Data;
 using BTCPayServer.Services.Invoices;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NBitcoin;
 using Npgsql;
+using Npgsql.EntityFrameworkCore.PostgreSQL.Infrastructure;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Floresta.Tests;
@@ -153,6 +156,18 @@ public partial class FlorestaListenerInitializationTests
         : ApplicationDbContextFactory(Options.Create(new DatabaseOptions { ConnectionString = connection }),
             NullLoggerFactory.Instance), IAsyncDisposable
     {
+        public SaveChangesInterceptor? SaveInterceptor { get; set; }
+
+        public override ApplicationDbContext CreateContext(Action<NpgsqlDbContextOptionsBuilder>? configure = null)
+        {
+            return base.CreateContext(options =>
+            {
+                configure?.Invoke(options);
+                if (SaveInterceptor is { } interceptor)
+                    ((IRelationalDbContextOptionsBuilderInfrastructure)options).OptionsBuilder.AddInterceptors(interceptor);
+            });
+        }
+
         public static async Task<PostgresInvoiceDatabase> CreateAsync()
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(1));

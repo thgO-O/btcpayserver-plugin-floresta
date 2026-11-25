@@ -8,6 +8,7 @@ using BTCPayServer.Data;
 using BTCPayServer.Plugins.Floresta.Data;
 using BTCPayServer.Plugins.Floresta.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using NBitcoin;
 using NBXplorer.Models;
 using Xunit;
@@ -211,9 +212,12 @@ public partial class FlorestaListenerInitializationTests
         Assert.Equal(1, harness.ReceivedPayments);
     }
 
-    [Fact]
+    [Theory]
     [Trait("Integration", "Integration")]
-    public async Task PaymentSaveFailureStillDeliversLaterOutputs()
+    [InlineData("write-rejected")]
+    [InlineData("write-exception")]
+    [InlineData("read-exception")]
+    public async Task FirstOutputFailureStillDeliversLaterOutputs(string fault)
     {
         await using var invoices = await PostgresInvoiceDatabase.CreateAsync();
         await using var harness = new Harness(invoices: invoices);
@@ -232,11 +236,25 @@ public partial class FlorestaListenerInitializationTests
             ? new object[] { new { tx_hash = txid.ToString(), height = 80 } }
             : Array.Empty<object>();
         await harness.Tracker.TrackWalletAsync(wallet, harness.Token);
+        await using (var cache = harness.Database.CreateContext())
+            Assert.False(await cache.Utxos.AnyAsync(u => !u.IsSpent, harness.Token));
 
         await using var faultContext = invoices.CreateContext();
-        // Reject only the first output in this test's disposable invoice database.
-        await faultContext.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Payments" ADD CONSTRAINT reject_first_output CHECK ("Amount" <> 0.00001234)""", harness.Token);
+        var firstInvoiceRow = faultContext.Invoices.Where(i => i.Id == firstInvoice);
+        string? originalBlob = null;
+        if (fault == "read-exception")
+        {
+            originalBlob = await firstInvoiceRow.Select(i => i.Blob2).SingleAsync(harness.Token);
+            Assert.NotNull(originalBlob);
+            // PostgreSQL accepts the JSON array, but the invoice lookup expects an object.
+            Assert.Equal(1, await firstInvoiceRow.ExecuteUpdateAsync(
+                b => b.SetProperty(i => i.Blob2, "[]"), harness.Token));
+        }
+        else if (fault == "write-exception")
+            invoices.SaveInterceptor = new ThrowOnPaymentSave(new OutPoint(txid, 0).ToString());
+        else
+            await faultContext.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Payments" ADD CONSTRAINT reject_first_output CHECK ("Amount" <> 0.00001234)""", harness.Token);
         await harness.Listener.ProcessPendingTransactionsAsync(harness.Listener.ProcessPendingTransactionAsync, harness.Token);
         Assert.Single(harness.Tracker.PendingTransactions);
         await using (var context = invoices.CreateContext())
@@ -247,8 +265,14 @@ public partial class FlorestaListenerInitializationTests
         }
         Assert.Equal(1, harness.ReceivedPayments);
 
-        await faultContext.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Payments" DROP CONSTRAINT reject_first_output""", harness.Token);
+        if (originalBlob is not null)
+            Assert.Equal(1, await firstInvoiceRow.ExecuteUpdateAsync(
+                b => b.SetProperty(i => i.Blob2, originalBlob), harness.Token));
+        else if (fault == "write-exception")
+            invoices.SaveInterceptor = null;
+        else
+            await faultContext.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Payments" DROP CONSTRAINT reject_first_output""", harness.Token);
         await harness.Listener.ProcessPendingTransactionsAsync(harness.Listener.ProcessPendingTransactionAsync, harness.Token);
         await using var retriedContext = invoices.CreateContext();
         var payments = await retriedContext.Payments.AsNoTracking().OrderBy(p => p.Id).ToListAsync(harness.Token);
@@ -258,4 +282,15 @@ public partial class FlorestaListenerInitializationTests
         Assert.Empty(harness.Tracker.PendingTransactions);
     }
 
+    private sealed class ThrowOnPaymentSave(string outpoint) : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken ct = default)
+        {
+            if (eventData.Context!.ChangeTracker.Entries<PaymentData>().Any(entry =>
+                    entry.State == EntityState.Added && entry.Entity.Id == outpoint))
+                throw new IOException("Payment write temporarily unavailable");
+            return base.SavingChangesAsync(eventData, result, ct);
+        }
+    }
 }
