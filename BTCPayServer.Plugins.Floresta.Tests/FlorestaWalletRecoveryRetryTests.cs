@@ -50,7 +50,7 @@ public partial class FlorestaListenerInitializationTests
         await WaitForTrackingCleanupAsync(harness.Tracker, deadline.Token);
         Assert.True(failed);
         Assert.True(harness.Tracker.HasDeferredWalletSynchronizations);
-        while (harness.Tracker.RecoveredTransactions.IsEmpty)
+        while (harness.Tracker.PendingTransactions.IsEmpty)
         {
             Assert.Null(await harness.InitializeAsync());
             await Task.Delay(10, deadline.Token);

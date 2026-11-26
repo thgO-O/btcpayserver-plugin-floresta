@@ -879,7 +879,7 @@ public partial class FlorestaListenerInitializationTests
         {
             await harness.InitializeAsync();
             await deferred.Task.WaitAsync(harness.Token);
-            Assert.Empty(harness.Tracker.RecoveredTransactions);
+            Assert.Empty(harness.Tracker.PendingTransactions);
         }
 
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -902,19 +902,19 @@ public partial class FlorestaListenerInitializationTests
         } while (!entered.Task.IsCompleted);
 
         var delivered = new List<FlorestaWalletTracker.NewTransactionInfo>();
-        Task<bool> Process(FlorestaWalletTracker.NewTransactionInfo tx, CancellationToken _)
+        Task<ReceiptDeliveryResult> Process(FlorestaWalletTracker.NewTransactionInfo tx, CancellationToken _)
         {
             delivered.Add(tx);
-            return Task.FromResult(true);
+            return Task.FromResult(ReceiptDeliveryResult.Delivered);
         }
         try
         {
             // A returned preparation is not a completed sync or a payment signal.
             if (!syncOnlyRetry)
                 await recovery.WaitAsync(harness.Token);
-            await harness.Listener.ProcessRecoveredTransactionsAsync(Process, harness.Token);
+            await harness.Listener.ProcessPendingTransactionsAsync(Process, harness.Token);
             Assert.Empty(delivered);
-            Assert.Empty(harness.Tracker.RecoveredTransactions);
+            Assert.Empty(harness.Tracker.PendingTransactions);
         }
         finally
         {
@@ -924,9 +924,9 @@ public partial class FlorestaListenerInitializationTests
 
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
-        while (harness.Tracker.RecoveredTransactions.IsEmpty)
+        while (harness.Tracker.PendingTransactions.IsEmpty)
             await Task.Delay(10, deadline.Token);
-        await harness.Listener.ProcessRecoveredTransactionsAsync(Process, harness.Token);
+        await harness.Listener.ProcessPendingTransactionsAsync(Process, harness.Token);
         var received = Assert.Single(delivered);
         Assert.Equal(transaction.GetHash().ToString(), received.TxId);
         Assert.Equal(1234, Assert.Single(received.Outputs).Value.Satoshi);
@@ -944,10 +944,10 @@ public partial class FlorestaListenerInitializationTests
         for (var pass = 0; pass < 3; pass++)
         {
             await harness.InitializeAsync();
-            await harness.Listener.ProcessRecoveredTransactionsAsync(Process, harness.Token);
+            await harness.Listener.ProcessPendingTransactionsAsync(Process, harness.Token);
         }
         Assert.Single(delivered);
-        Assert.Empty(harness.Tracker.RecoveredTransactions);
+        Assert.Empty(harness.Tracker.PendingTransactions);
         Assert.Equal(1, harness.RescanRequests);
     }
 
@@ -960,12 +960,12 @@ public partial class FlorestaListenerInitializationTests
         await using var harness = new Harness();
         var first = new FlorestaWalletTracker.NewTransactionInfo { TxId = uint256.One.ToString() };
         var second = new FlorestaWalletTracker.NewTransactionInfo { TxId = uint256.Zero.ToString() };
-        harness.Tracker.RecoveredTransactions.Enqueue(first);
-        harness.Tracker.RecoveredTransactions.Enqueue(second);
+        harness.Tracker.PendingTransactions.Enqueue(first);
+        harness.Tracker.PendingTransactions.Enqueue(second);
         using var canceled = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
         var delivered = new List<string>();
         var attempts = 0;
-        Task<bool> Fail(FlorestaWalletTracker.NewTransactionInfo tx, CancellationToken ct)
+        Task<ReceiptDeliveryResult> Fail(FlorestaWalletTracker.NewTransactionInfo tx, CancellationToken ct)
         {
             attempts++;
             if (ReferenceEquals(tx, first))
@@ -976,27 +976,27 @@ public partial class FlorestaListenerInitializationTests
                     canceled.Cancel();
                     throw new OperationCanceledException(ct);
                 }
-                return Task.FromResult(false);
+                return Task.FromResult(ReceiptDeliveryResult.Retry);
             }
             delivered.Add(tx.TxId);
-            return Task.FromResult(true);
+            return Task.FromResult(ReceiptDeliveryResult.Delivered);
         }
         if (failure == "cancel")
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-                harness.Listener.ProcessRecoveredTransactionsAsync(Fail, canceled.Token));
+                harness.Listener.ProcessPendingTransactionsAsync(Fail, canceled.Token));
         else
-            await harness.Listener.ProcessRecoveredTransactionsAsync(Fail, canceled.Token);
+            await harness.Listener.ProcessPendingTransactionsAsync(Fail, canceled.Token);
         Assert.Equal(failure == "cancel" ? 1 : 2, attempts);
-        Assert.Equal(failure == "cancel" ? 2 : 1, harness.Tracker.RecoveredTransactions.Count);
+        Assert.Equal(failure == "cancel" ? 2 : 1, harness.Tracker.PendingTransactions.Count);
 
-        await harness.Listener.ProcessRecoveredTransactionsAsync((tx, _) =>
+        await harness.Listener.ProcessPendingTransactionsAsync((tx, _) =>
         {
             delivered.Add(tx.TxId);
-            return Task.FromResult(true);
+            return Task.FromResult(ReceiptDeliveryResult.Delivered);
         }, harness.Token);
         Assert.Equal(2, delivered.Distinct().Count());
         Assert.Equal(2, delivered.Count);
-        Assert.Empty(harness.Tracker.RecoveredTransactions);
+        Assert.Empty(harness.Tracker.PendingTransactions);
     }
 
     [Fact]
@@ -1005,23 +1005,23 @@ public partial class FlorestaListenerInitializationTests
         await using var harness = new Harness();
         var first = new FlorestaWalletTracker.NewTransactionInfo { TxId = uint256.One.ToString() };
         var second = new FlorestaWalletTracker.NewTransactionInfo { TxId = uint256.Zero.ToString() };
-        harness.Tracker.RecoveredTransactions.Enqueue(first);
+        harness.Tracker.PendingTransactions.Enqueue(first);
         var delivered = new List<string>();
-        await harness.Listener.ProcessRecoveredTransactionsAsync((tx, _) =>
+        await harness.Listener.ProcessPendingTransactionsAsync((tx, _) =>
         {
             delivered.Add(tx.TxId);
-            harness.Tracker.RecoveredTransactions.Enqueue(second);
-            return Task.FromResult(true);
+            harness.Tracker.PendingTransactions.Enqueue(second);
+            return Task.FromResult(ReceiptDeliveryResult.Delivered);
         }, harness.Token);
         Assert.Equal(first.TxId, Assert.Single(delivered));
-        Assert.Same(second, Assert.Single(harness.Tracker.RecoveredTransactions));
-        await harness.Listener.ProcessRecoveredTransactionsAsync((tx, _) =>
+        Assert.Same(second, Assert.Single(harness.Tracker.PendingTransactions));
+        await harness.Listener.ProcessPendingTransactionsAsync((tx, _) =>
         {
             delivered.Add(tx.TxId);
-            return Task.FromResult(true);
+            return Task.FromResult(ReceiptDeliveryResult.Delivered);
         }, harness.Token);
         Assert.Equal(new[] { first.TxId, second.TxId }, delivered);
-        Assert.Empty(harness.Tracker.RecoveredTransactions);
+        Assert.Empty(harness.Tracker.PendingTransactions);
     }
 
     [Theory]
@@ -1164,7 +1164,7 @@ public partial class FlorestaListenerInitializationTests
             await deferred.Task.WaitAsync(deadline.Token);
             if (scenario != "ibd-initialization")
                 Assert.True(harness.Tracker.HasDeferredWalletSynchronizations);
-            Assert.Empty(harness.Tracker.RecoveredTransactions);
+            Assert.Empty(harness.Tracker.PendingTransactions);
             var generation = harness.Electrum.ConnectionGeneration;
             if (scenario == "rpc-refresh")
             {
@@ -1185,7 +1185,7 @@ public partial class FlorestaListenerInitializationTests
         {
             while (harness.Tracker.HasDeferredWalletSynchronizations)
                 await Task.Delay(10, deadline.Token);
-            Assert.Empty(harness.Tracker.RecoveredTransactions);
+            Assert.Empty(harness.Tracker.PendingTransactions);
             harness.HistoryResponse = recoveredHistory;
             await harness.Electrum.DisconnectAsync();
             await EnvironmentVariableTestHelper.WithBackendReplacementEnvironmentAsync("true", async () =>
@@ -1195,7 +1195,7 @@ public partial class FlorestaListenerInitializationTests
             });
             Assert.Equal(90, await harness.InitializeAsync());
         }
-        while (harness.Tracker.RecoveredTransactions.IsEmpty)
+        while (harness.Tracker.PendingTransactions.IsEmpty)
         {
             if (directImport)
                 await harness.InitializeAsync();
@@ -1217,8 +1217,8 @@ public partial class FlorestaListenerInitializationTests
         {
             // Retain the discovery snapshot across a failed delivery and a
             // later wallet sync before the real payment consumer runs.
-            await harness.Listener.ProcessRecoveredTransactionsAsync((_, _) =>
-                Task.FromException<bool>(new IOException("consumer temporarily unavailable")), harness.Token);
+            await harness.Listener.ProcessPendingTransactionsAsync((_, _) =>
+                Task.FromException<ReceiptDeliveryResult>(new IOException("consumer temporarily unavailable")), harness.Token);
             if (scenario == "stale-removed")
             {
                 harness.HistoryResponse = _ => Array.Empty<object>();
@@ -1258,7 +1258,7 @@ public partial class FlorestaListenerInitializationTests
         Assert.Equal(current.Height, harness.LastOnChainTransaction.Height);
         Assert.Equal(1, harness.ReceivedPayments);
         Assert.Equal(1, harness.OnChainEvents);
-        Assert.Empty(harness.Tracker.RecoveredTransactions);
+        Assert.Empty(harness.Tracker.PendingTransactions);
         Assert.Equal(autoRescan ? 1 : 0, harness.RescanRequests);
     }
 
@@ -1303,7 +1303,7 @@ public partial class FlorestaListenerInitializationTests
         restarted.UpdateSettings(s => s.AutoRescanOnNewDescriptor = true);
         var transaction = restarted.SetRecoveredHistory(addresses[0], true);
         Assert.Equal(90, await restarted.InitializeAsync());
-        Assert.Single(restarted.Tracker.RecoveredTransactions);
+        Assert.Single(restarted.Tracker.PendingTransactions);
         await restarted.RunUntilPaymentAsync();
         await using (var ctx = invoices.CreateContext())
         {
@@ -1357,7 +1357,7 @@ public partial class FlorestaListenerInitializationTests
             }
             return true;
         });
-        Assert.Empty(harness.Tracker.RecoveredTransactions);
+        Assert.Empty(harness.Tracker.PendingTransactions);
         Assert.Equal(0, harness.ReceivedPayments);
     }
 
@@ -1566,7 +1566,7 @@ public partial class FlorestaListenerInitializationTests
                 await Listener.StartAsync(Token);
                 try
                 {
-                    while (ReceivedPayments == 0 || !Tracker.RecoveredTransactions.IsEmpty)
+                    while (ReceivedPayments == 0 || !Tracker.PendingTransactions.IsEmpty)
                         await Task.Delay(10, deadline.Token);
                 }
                 finally { await Listener.StopAsync(Token); }
@@ -1788,21 +1788,7 @@ public partial class FlorestaListenerInitializationTests
                 throw new InvalidOperationException("Wallet database unavailable");
             }
             return new(new DbContextOptionsBuilder<FlorestaDbContext>(_options)
-                .AddInterceptors(new CommitFailureInterceptor(this)).Options);
-        }
-
-        private sealed class CommitFailureInterceptor(DatabaseFactory database) : SaveChangesInterceptor
-        {
-            public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
-                DbContextEventData eventData, InterceptionResult<int> result, CancellationToken ct = default)
-            {
-                if (database.FailNextSave)
-                {
-                    database.FailNextSave = false;
-                    throw new DbUpdateException("Wallet cache commit temporarily unavailable");
-                }
-                return base.SavingChangesAsync(eventData, result, ct);
-            }
+                .AddInterceptors(new OneShotSaveFailureInterceptor(() => FailNextSave, () => FailNextSave = false)).Options);
         }
     }
 
@@ -1817,11 +1803,29 @@ public partial class FlorestaListenerInitializationTests
         private readonly DbContextOptions<ApplicationDbContext> _options =
             new DbContextOptionsBuilder<ApplicationDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
         private int _contextsCreated;
+        public Action? BeforeCreateContext { get; set; }
+        public bool FailNextSave { get; set; }
         public int ContextsCreated => Volatile.Read(ref _contextsCreated);
         public override ApplicationDbContext CreateContext(Action<NpgsqlDbContextOptionsBuilder>? configure = null)
         {
+            BeforeCreateContext?.Invoke();
             Interlocked.Increment(ref _contextsCreated);
-            return new(_options);
+            return new(new DbContextOptionsBuilder<ApplicationDbContext>(_options)
+                .AddInterceptors(new OneShotSaveFailureInterceptor(() => FailNextSave, () => FailNextSave = false)).Options);
+        }
+    }
+
+    private sealed class OneShotSaveFailureInterceptor(Func<bool> shouldFail, Action reset) : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken ct = default)
+        {
+            if (shouldFail())
+            {
+                reset();
+                throw new DbUpdateException("Database write temporarily unavailable");
+            }
+            return base.SavingChangesAsync(eventData, result, ct);
         }
     }
 }

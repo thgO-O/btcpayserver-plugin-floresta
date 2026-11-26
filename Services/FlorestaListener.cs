@@ -147,7 +147,7 @@ public class FlorestaListener : IHostedService
 
         var initializedHeight = await InitializeListenerAsync(ct);
         if (_statusMonitor.IsNetworkCompatible)
-            await ProcessRecoveredTransactionsAsync(ProcessRecoveredTransactionAsync, ct);
+            await ProcessPendingTransactionsAsync(ProcessPendingTransactionAsync, ct);
         if (initializedHeight is not null)
             await RequestPaymentPollingAsync(ct);
 
@@ -227,9 +227,8 @@ public class FlorestaListener : IHostedService
                 if (!await IsBitcoinBackendActiveAsync(ct) || !_statusMonitor.IsNetworkCompatible)
                     return;
 
-                var newTxs = await _tracker.HandleScripthashNotificationAsync(scripthash, status, ct);
-
-                await ProcessNewTransactions(newTxs, ct);
+                await _tracker.HandleScripthashNotificationAsync(scripthash, status, ct);
+                await ProcessPendingTransactionsAsync(ProcessPendingTransactionAsync, ct);
                 await RequestPaymentPollingAsync(ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -256,9 +255,8 @@ public class FlorestaListener : IHostedService
                 if (!_statusMonitor.IsNetworkCompatible)
                     return;
 
-                var newTxs = await _tracker.HandleNewBlockAsync(header.Height, ct);
-
-                await ProcessNewTransactions(newTxs, ct);
+                await _tracker.HandleNewBlockAsync(header.Height, ct);
+                await ProcessPendingTransactionsAsync(ProcessPendingTransactionAsync, ct);
                 await RequestPaymentPollingAsync(ct);
                 await PublishChainUpdate(ct);
             }
@@ -293,8 +291,8 @@ public class FlorestaListener : IHostedService
             if (catchUpHeight is null)
                 return;
 
-            var newTxs = await _tracker.HandleNewBlockAsync(catchUpHeight.Value, ct);
-            await ProcessNewTransactions(newTxs, ct);
+            await _tracker.HandleNewBlockAsync(catchUpHeight.Value, ct);
+            await ProcessPendingTransactionsAsync(ProcessPendingTransactionAsync, ct);
             await RequestPaymentPollingAsync(ct);
             await PublishChainUpdate(ct);
         }
@@ -315,81 +313,31 @@ public class FlorestaListener : IHostedService
         return isNetworkCompatible ? initializedHeight ?? currentTipHeight : null;
     }
 
-    private async Task ProcessNewTransactions(
-        IReadOnlyCollection<FlorestaWalletTracker.NewTransactionInfo> newTxs,
-        CancellationToken ct)
-    {
-        if (newTxs == null || newTxs.Count == 0 || ct.IsCancellationRequested)
-            return;
-
-        var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
-        if (network == null) return;
-
-        var wallet = _walletProvider.GetWallet(network);
-        if (wallet == null) return;
-
-        var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
-
-        foreach (var newTx in newTxs)
-        {
-            ct.ThrowIfCancellationRequested();
-            await ProcessNewTransaction(newTx, network, wallet, pmi, ct);
-        }
-    }
-
-    internal async Task<bool> ProcessRecoveredTransactionAsync(
+    internal async Task<ReceiptDeliveryResult> ProcessPendingTransactionAsync(
         FlorestaWalletTracker.NewTransactionInfo transaction, CancellationToken ct)
     {
         var network = _networkProvider.GetNetwork<BTCPayNetwork>("BTC");
-        if (network == null) return false;
+        if (network == null) return ReceiptDeliveryResult.Retry;
         var wallet = _walletProvider.GetWallet(network);
-        if (wallet == null || _handlers.GetBitcoinHandler(network) == null) return false;
+        if (wallet == null || _handlers.GetBitcoinHandler(network) == null) return ReceiptDeliveryResult.Retry;
 
         // A retained receipt may outlive a reorg or history reconciliation.
         // Use its actual cache owner, not an unrelated wallet with the same txid.
-        if (transaction.WalletId == null) return false;
+        if (transaction.WalletId == null) return ReceiptDeliveryResult.Discard;
         var current = await _tracker.GetTransactionInfoAsync(transaction.WalletId, transaction.TxId, ct);
-        if (current == null) return false;
+        // A committed row can disappear after an explicit wallet-cache wipe.
+        // A subsequent sync will discover and enqueue a fresh receipt if it returns.
+        if (current == null) return ReceiptDeliveryResult.Discard;
         transaction.Confirmations = (int)current.Confirmations;
         transaction.Height = (int)(current.Height ?? 0);
 
-        await ProcessNewTransaction(transaction, network, wallet,
+        return await ProcessNewTransaction(transaction, network, wallet,
             PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode), ct);
-        return true;
     }
 
-    internal async Task ProcessRecoveredTransactionsAsync(
-        Func<FlorestaWalletTracker.NewTransactionInfo, CancellationToken, Task<bool>> process,
-        CancellationToken ct)
-    {
-        // One bounded pass: failed deliveries remain for the existing listener
-        // loop, while other recovered transactions can still be processed.
-        var count = _tracker.RecoveredTransactions.Count;
-        for (var i = 0; i < count; i++)
-        {
-            ct.ThrowIfCancellationRequested();
-            // This loop is the only consumer. Keep the head while awaiting the
-            // payment pipeline so cancellation cannot acknowledge it early.
-            if (!_tracker.RecoveredTransactions.TryPeek(out var transaction))
-                break;
-            var processed = false;
-            try
-            {
-                processed = await process(transaction, ct);
-                ct.ThrowIfCancellationRequested();
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to process recovered transaction {TxId}; retrying", transaction.TxId);
-            }
-            if (_tracker.RecoveredTransactions.TryDequeue(out var delivered) && !processed)
-                _tracker.RecoveredTransactions.Enqueue(delivered);
-        }
-    }
+    internal Task ProcessPendingTransactionsAsync(
+        Func<FlorestaWalletTracker.NewTransactionInfo, CancellationToken, Task<ReceiptDeliveryResult>> process,
+        CancellationToken ct) => _tracker.PendingTransactions.ProcessPendingAsync(process, _logger, ct);
 
     internal async Task PublishChainUpdate(CancellationToken ct)
     {
@@ -401,7 +349,7 @@ public class FlorestaListener : IHostedService
         await UpdatePaymentStates(network, pmi, ct);
     }
 
-    private async Task ProcessNewTransaction(
+    private async Task<ReceiptDeliveryResult> ProcessNewTransaction(
         FlorestaWalletTracker.NewTransactionInfo txInfo,
         BTCPayNetwork network, BTCPayWallet wallet, PaymentMethodId pmi, CancellationToken ct)
     {
@@ -411,58 +359,88 @@ public class FlorestaListener : IHostedService
         PublishNewOnChainTransaction(txInfo, network, pmi);
 
         if (txInfo.DerivationStrategy == null)
-            return;
+            return ReceiptDeliveryResult.Delivered;
 
+        var result = ReceiptDeliveryResult.Delivered;
         foreach (var output in txInfo.Outputs)
         {
-            var invoice = await _invoiceRepository.GetInvoiceFromAddress(pmi, output.TrackedDestination);
-            if (invoice == null)
-                continue;
-
-            var outpoint = CreatePaymentOutPoint(txInfo.TxId, output.Index);
-
-            var paymentData = new PaymentData
+            ct.ThrowIfCancellationRequested();
+            try
             {
-                Id = outpoint.ToString(),
-                InvoiceDataId = invoice.Id,
-                PaymentMethodId = pmi.ToString(),
-                Status = txInfo.Confirmations > 0 ? PaymentStatus.Settled : PaymentStatus.Processing,
-                Amount = output.Value.ToDecimal(MoneyUnit.BTC),
-                Currency = network.CryptoCode,
-                Created = txInfo.SeenAt
-            };
-
-            var handler = _handlers.GetBitcoinHandler(network);
-            if (handler == null) continue;
-
-            var details = new BitcoinLikePaymentData(
-                outpoint,
-                txInfo.IsRbf,
-                new KeyPath(output.KeyPath),
-                output.KeyIndex)
-            {
-                ConfirmationCount = ClampConfirmations(txInfo.Confirmations, network)
-            };
-
-            paymentData.Set(invoice, handler, details);
-            paymentData.Status = GetPaymentStatus(invoice, details);
-
-            var payment = await _paymentService.AddPayment(paymentData, [txInfo.TxId]);
-            if (payment != null)
-            {
-                _logger.LogInformation("Recorded payment {PaymentId} for invoice {InvoiceId}",
-                    payment.Id, invoice.Id);
-                _eventAggregator.Publish(new InvoiceEvent(invoice, InvoiceEvent.ReceivedPayment)
-                {
-                    Payment = payment
-                });
+                if (await ProcessPaymentOutputAsync(txInfo, output, network, pmi, ct) == ReceiptDeliveryResult.Retry)
+                    result = ReceiptDeliveryResult.Retry;
             }
-            else
+            catch (Exception ex)
             {
-                if (await UpdatePaymentStatesForInvoice(network, pmi, invoice, ct))
-                    _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
+                ct.ThrowIfCancellationRequested();
+                _logger.LogWarning(ex, "Failed to deliver transaction {TxId} output {OutputIndex}; retrying",
+                    txInfo.TxId, output.Index);
+                result = ReceiptDeliveryResult.Retry;
             }
         }
+        return result;
+    }
+
+    private async Task<ReceiptDeliveryResult> ProcessPaymentOutputAsync(
+        FlorestaWalletTracker.NewTransactionInfo txInfo, FlorestaWalletTracker.OutputInfo output,
+        BTCPayNetwork network, PaymentMethodId pmi, CancellationToken ct)
+    {
+        var invoice = await _invoiceRepository.GetInvoiceFromAddress(pmi, output.TrackedDestination);
+        if (invoice == null)
+            return ReceiptDeliveryResult.Delivered;
+
+        var outpoint = CreatePaymentOutPoint(txInfo.TxId, output.Index);
+        var paymentData = new PaymentData
+        {
+            Id = outpoint.ToString(),
+            InvoiceDataId = invoice.Id,
+            PaymentMethodId = pmi.ToString(),
+            Status = txInfo.Confirmations > 0 ? PaymentStatus.Settled : PaymentStatus.Processing,
+            Amount = output.Value.ToDecimal(MoneyUnit.BTC),
+            Currency = network.CryptoCode,
+            Created = txInfo.SeenAt
+        };
+
+        var handler = _handlers.GetBitcoinHandler(network);
+        if (handler == null)
+            return ReceiptDeliveryResult.Delivered;
+
+        var details = new BitcoinLikePaymentData(
+            outpoint,
+            txInfo.IsRbf,
+            new KeyPath(output.KeyPath),
+            output.KeyIndex)
+        {
+            ConfirmationCount = ClampConfirmations(txInfo.Confirmations, network)
+        };
+
+        paymentData.Set(invoice, handler, details);
+        paymentData.Status = GetPaymentStatus(invoice, details);
+
+        var payment = await _paymentService.AddPayment(paymentData, [txInfo.TxId]);
+        if (payment != null)
+        {
+            _logger.LogInformation("Recorded payment {PaymentId} for invoice {InvoiceId}",
+                payment.Id, invoice.Id);
+            _eventAggregator.Publish(new InvoiceEvent(invoice, InvoiceEvent.ReceivedPayment)
+            {
+                Payment = payment
+            });
+            return ReceiptDeliveryResult.Delivered;
+        }
+
+        // The host also returns null when saving the payment fails.
+        var currentInvoice = await _invoiceRepository.GetInvoice(invoice.Id);
+        if (currentInvoice?.GetPaymentPrompt(pmi) == null)
+            return ReceiptDeliveryResult.Delivered;
+        if (!currentInvoice.GetPayments(false).Any(p => p.Id == paymentData.Id && p.PaymentMethodId == pmi))
+        {
+            _logger.LogWarning("Payment {PaymentId} was not persisted; delivery will be retried", paymentData.Id);
+            return ReceiptDeliveryResult.Retry;
+        }
+        if (await UpdatePaymentStatesForInvoice(network, pmi, currentInvoice, ct))
+            _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoice.Id));
+        return ReceiptDeliveryResult.Delivered;
     }
 
     internal static OutPoint CreatePaymentOutPoint(string txId, int outputIndex)

@@ -65,7 +65,7 @@ public partial class FlorestaListenerInitializationTests
             await Synchronize();
         harness.BeforeSubscription = () => Task.CompletedTask;
         Assert.True(sawCommittedSubscription);
-        Assert.Equal(transaction.GetHash().ToString(), Assert.Single(harness.Tracker.RecoveredTransactions).TxId);
+        Assert.Equal(transaction.GetHash().ToString(), Assert.Single(harness.Tracker.PendingTransactions).TxId);
         await using (var ctx = harness.Database.CreateContext())
             Assert.Empty(await ctx.Utxos.Where(u => !u.IsSpent).ToListAsync(harness.Token));
         await harness.RunUntilPaymentAsync();
@@ -77,7 +77,7 @@ public partial class FlorestaListenerInitializationTests
         Assert.Equal(PaymentStatus.Settled, payment.Status);
         Assert.Equal(1, harness.ReceivedPayments);
         Assert.Equal(1, harness.OnChainEvents);
-        Assert.Empty(harness.Tracker.RecoveredTransactions);
+        Assert.Empty(harness.Tracker.PendingTransactions);
         Assert.Equal(0, harness.RescanRequests);
     }
 
@@ -99,12 +99,12 @@ public partial class FlorestaListenerInitializationTests
         await Assert.ThrowsAsync<DbUpdateException>(() => harness.Tracker.TrackWalletAsync(wallet, harness.Token));
         harness.BeforeSubscription = () => Task.CompletedTask;
         Assert.False(harness.Database.FailNextSave);
-        Assert.Empty(harness.Tracker.RecoveredTransactions);
+        Assert.Empty(harness.Tracker.PendingTransactions);
         await using (var cache = harness.Database.CreateContext())
             Assert.Empty(await cache.Transactions.ToListAsync(harness.Token));
         Assert.True(harness.Tracker.HasDeferredWalletSynchronizations);
         await harness.Tracker.RetryPendingWalletsAsync(harness.Token);
-        Assert.Single(harness.Tracker.RecoveredTransactions);
+        Assert.Single(harness.Tracker.PendingTransactions);
         await harness.RunUntilPaymentAsync();
         await using var ctx = invoices.CreateContext();
         Assert.Equal(invoiceId, Assert.Single(await ctx.Payments.ToListAsync(harness.Token)).InvoiceDataId);

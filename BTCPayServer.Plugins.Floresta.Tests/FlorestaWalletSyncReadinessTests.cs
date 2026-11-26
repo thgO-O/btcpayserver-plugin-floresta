@@ -169,7 +169,7 @@ public class FlorestaWalletSyncReadinessTests
         electrum ??= new FlorestaElectrumClient(new FlorestaSettings(), NullLogger<FlorestaElectrumClient>.Instance);
         return (new FlorestaWalletSync(database, electrum, rpc, null!, null!,
             new ConcurrentDictionary<string, DerivationStrategyBase>(), () => 100,
-            Network.RegTest, NullLogger.Instance), database);
+            Network.RegTest, NullLogger.Instance, new FlorestaReceiptQueue()), database);
     }
 
     private sealed class DatabaseReachedException : Exception;
